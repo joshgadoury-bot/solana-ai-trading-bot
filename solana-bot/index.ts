@@ -250,8 +250,8 @@ export const getPhantomWallet = () => {
 
 export const fetchBirdeyeTrend = async (mintAddress: string) => {
   if (!BIRDEYE_API_KEY) {
-    console.warn("Skipping Birdeye trend analysis because BIRDEYE_API_KEY is not set.");
-    return null;
+    console.warn(`⚠️ Skipping 1-minute trend analysis for ${mintAddress} because BIRDEYE_API_KEY is not set.`);
+    return "SKIP_TREND"; // Return a special flag to indicate we should skip the spike requirement
   }
 
   // Get UNIX timestamp in seconds for the last 5 minutes
@@ -345,37 +345,47 @@ export const run = async () => {
 
          const rugCheckReport = await getRugCheckScore(mintAddress);
          if (rugCheckReport.isSafe) {
-           console.log(`Fetching 1-minute Birdeye trend for ${mintAddress}...`);
-           const trendData = await fetchBirdeyeTrend(mintAddress);
-           if (trendData) {
-             const isSpiking = checkPriceSpike(trendData);
-             if (isSpiking) {
-               console.log(`🎯 Triggering snipe trade for ${mintAddress}!`);
-               const buySuccess = await executeSwap(jupiterQuoteApi, connection, wallet!, {
-                 inputMint: TOKENS.SOL,
-                 outputMint: mintAddress,
-                 amount: 0.1 * LAMPORTS_PER_SOL // Sniper buys max 0.1 SOL immediately
-               });
+           let isSpiking = false;
 
-               if (buySuccess) {
-                 // Fetch the current entry price to begin monitoring
-                 const entryData = await fetch(`https://price.jup.ag/v4/price?ids=${mintAddress}`).then(res => res.json());
-                 if (entryData.data && entryData.data[mintAddress]) {
-                    const entryPrice = entryData.data[mintAddress].price;
-                    const action = await monitorPosition(mintAddress, entryPrice, 20, 10);
+           if (BIRDEYE_API_KEY) {
+             console.log(`Fetching 1-minute Birdeye trend for ${mintAddress}...`);
+             const trendData = await fetchBirdeyeTrend(mintAddress);
+             if (trendData && trendData !== "SKIP_TREND") {
+               isSpiking = checkPriceSpike(trendData as any[]);
+             }
+           } else {
+             // If the user doesn't have a Birdeye key, we skip the 5% spike requirement
+             // and immediately snipe the token since it passed all safety checks.
+             console.log(`⚠️ Birdeye key missing. Skipping 5% spike check. Sniping safe token immediately!`);
+             isSpiking = true;
+           }
 
-                    if (action === "SELL") {
-                        const tokenBalance = await getTokenBalance(connection, wallet.publicKey, new PublicKey(mintAddress));
-                        if (tokenBalance > 0) {
-                           console.log(`Selling full balance of ${mintAddress}`);
-                           await executeSwap(jupiterQuoteApi, connection, wallet!, {
-                             inputMint: mintAddress,
-                             outputMint: TOKENS.SOL,
-                             amount: tokenBalance // Sell entire bag back to SOL
-                           });
-                        }
-                    }
-                 }
+           if (isSpiking) {
+             console.log(`🎯 Triggering snipe trade for ${mintAddress}!`);
+             const buySuccess = await executeSwap(jupiterQuoteApi, connection, wallet!, {
+               inputMint: TOKENS.SOL,
+               outputMint: mintAddress,
+               amount: 0.1 * LAMPORTS_PER_SOL // Sniper buys max 0.1 SOL immediately
+             });
+
+             if (buySuccess) {
+               // Fetch the current entry price to begin monitoring
+               const entryData = await fetch(`https://price.jup.ag/v4/price?ids=${mintAddress}`).then(res => res.json());
+               if (entryData.data && entryData.data[mintAddress]) {
+                  const entryPrice = entryData.data[mintAddress].price;
+                  const action = await monitorPosition(mintAddress, entryPrice, 20, 10);
+
+                  if (action === "SELL") {
+                      const tokenBalance = await getTokenBalance(connection, wallet.publicKey, new PublicKey(mintAddress));
+                      if (tokenBalance > 0) {
+                         console.log(`Selling full balance of ${mintAddress}`);
+                         await executeSwap(jupiterQuoteApi, connection, wallet!, {
+                           inputMint: mintAddress,
+                           outputMint: TOKENS.SOL,
+                           amount: tokenBalance // Sell entire bag back to SOL
+                         });
+                      }
+                  }
                }
              }
            }
