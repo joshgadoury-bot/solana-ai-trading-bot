@@ -4,6 +4,7 @@ import fetch from 'cross-fetch';
 import { createJupiterApiClient } from '@jup-ag/api';
 import { OpenAI } from 'openai';
 import dotenv from 'dotenv';
+import { startScanner } from './scanner';
 
 dotenv.config();
 
@@ -256,80 +257,6 @@ export const checkPriceSpike = (trendData: any[]) => {
   return false;
 };
 
-export const monitorSerumForNewMarkets = (connection: Connection, wallet: Keypair, jupiterQuoteApi: any) => {
-  // Common Serum / OpenBook program ID on mainnet
-  const SERUM_PROGRAM_ID = new PublicKey("srmqPvymZyRtxMuTX5X57X8fT6C5s8xWbL3h1TfFqB1"); // OpenBook v3
-  console.log(`📡 Listening for new markets on Serum program: ${SERUM_PROGRAM_ID.toBase58()}`);
-
-  connection.onLogs(
-    SERUM_PROGRAM_ID,
-    async (logs, ctx) => {
-      // Check for market initialization logs
-      if (logs.logs.some(log => log.includes("InitializeMarket") || log.includes("InitMarket"))) {
-        console.log(`🔥 Potential new market detected! Signature: ${logs.signature}`);
-
-        try {
-          // Fetch the parsed transaction to extract the mint
-          const tx = await connection.getParsedTransaction(logs.signature, { maxSupportedTransactionVersion: 0 });
-          if (!tx || !tx.transaction.message.instructions) return;
-
-          let baseMintAddress: string | null = null;
-
-          // Iterate through instructions to find the Serum program invocation
-          for (const ix of tx.transaction.message.instructions) {
-             if (ix.programId.equals(SERUM_PROGRAM_ID) && 'accounts' in ix) {
-                 const accounts = (ix as any).accounts;
-                 // In Serum v3 InitializeMarket, the base mint is usually the 8th account (index 7)
-                 // and quote mint is the 9th (index 8).
-                 if (accounts && accounts.length >= 9) {
-                    baseMintAddress = accounts[7].toBase58();
-                    // We can also extract the quote mint (usually WSOL or USDC)
-                    const quoteMintAddress = accounts[8].toBase58();
-                    console.log(`Identified Market: Base Mint: ${baseMintAddress}, Quote Mint: ${quoteMintAddress}`);
-                    break;
-                 }
-             }
-          }
-
-          if (baseMintAddress) {
-             console.log(`🔍 Checking Safety for Mint: ${baseMintAddress}...`);
-
-             const securityReport = await checkTokenSafety(connection, baseMintAddress);
-
-             if (securityReport.isSafe) {
-               const isRugCheckSafe = await checkRugCheck(baseMintAddress);
-               if (isRugCheckSafe) {
-                 console.log(`Fetching 1-minute Birdeye trend for ${baseMintAddress}...`);
-                 const trendData = await fetchBirdeyeTrend(baseMintAddress);
-                 if (trendData) {
-                   const isSpiking = checkPriceSpike(trendData);
-                   if (isSpiking) {
-                     console.log(`🎯 Triggering snipe trade for ${baseMintAddress}!`);
-                     await executeSwap(jupiterQuoteApi, connection, wallet, {
-                       inputMint: TOKENS.SOL,
-                       outputMint: baseMintAddress,
-                       amount: 0.1 * LAMPORTS_PER_SOL // Sniper buys max 0.1 SOL immediately
-                     });
-                   }
-                 }
-               } else {
-                 console.log(`🚫 Ignoring token ${baseMintAddress}: Failed RugCheck.xyz Trust Score.`);
-               }
-             } else {
-               console.log(`🚫 Ignoring unsafe token: ${baseMintAddress}. Reason: ${securityReport.reason}`);
-             }
-          } else {
-             console.log(`⚠️ Could not parse base mint from transaction ${logs.signature}`);
-          }
-
-        } catch (error: any) {
-           console.error("Error parsing new market transaction:", error?.message || error);
-        }
-      }
-    },
-    "confirmed"
-  );
-};
 
 export const run = async () => {
   console.log("Starting Solana AI Trading Bot...");
@@ -363,7 +290,36 @@ export const run = async () => {
 
   // 5. Start Sniping Event Listener
   if (wallet) {
-    monitorSerumForNewMarkets(connection, wallet, jupiterQuoteApi);
+    startScanner(connection, async (mintAddress: string) => {
+       console.log(`🔍 Checking Safety for Mint: ${mintAddress}...`);
+
+       const securityReport = await checkTokenSafety(connection, mintAddress);
+
+       if (securityReport.isSafe) {
+         console.log(`✅ BOTTING: ${mintAddress}`);
+
+         const isRugCheckSafe = await checkRugCheck(mintAddress);
+         if (isRugCheckSafe) {
+           console.log(`Fetching 1-minute Birdeye trend for ${mintAddress}...`);
+           const trendData = await fetchBirdeyeTrend(mintAddress);
+           if (trendData) {
+             const isSpiking = checkPriceSpike(trendData);
+             if (isSpiking) {
+               console.log(`🎯 Triggering snipe trade for ${mintAddress}!`);
+               await executeSwap(jupiterQuoteApi, connection, wallet!, {
+                 inputMint: TOKENS.SOL,
+                 outputMint: mintAddress,
+                 amount: 0.1 * LAMPORTS_PER_SOL // Sniper buys max 0.1 SOL immediately
+               });
+             }
+           }
+         } else {
+           console.log(`🚫 Ignoring token ${mintAddress}: Failed RugCheck.xyz Trust Score.`);
+         }
+       } else {
+         console.log(`❌ SKIPPING: ${securityReport.reason}`);
+       }
+    });
   }
 
   // 6. Bot Logic Loop
