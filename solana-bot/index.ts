@@ -1,5 +1,6 @@
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, VersionedTransaction } from '@solana/web3.js';
 import bs58 from 'bs58';
+import fetch from 'cross-fetch';
 import { createJupiterApiClient } from '@jup-ag/api';
 import { OpenAI } from 'openai';
 import dotenv from 'dotenv';
@@ -16,6 +17,52 @@ const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY;
 const TOKENS = {
   SOL: "So11111111111111111111111111111111111111112", // Wrapped SOL
   USDC: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" // USDC
+};
+
+const JUPITER_API = "https://quote-api.jup.ag/v6";
+
+export const getSwapTransaction = async (
+  wallet: Keypair,
+  inputMint: string,
+  outputMint: string,
+  amountInLamports: number
+) => {
+  // 1. Get the best price (Quote)
+  const quoteResponse = await fetch(
+    `${JUPITER_API}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountInLamports}&slippageBps=50`
+  ).then(res => res.json());
+
+  // 2. Get the serialized transaction
+  const response = await fetch(`${JUPITER_API}/swap`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      quoteResponse,
+      userPublicKey: wallet.publicKey.toString(),
+      wrapAndUnwrapSol: true,
+      // 2026 Pro Tip: Set high priority to beat other bots
+      prioritizationFeeLamports: 100000
+    })
+  });
+
+  const { swapTransaction, error } = await response.json();
+  if (error) {
+     console.error("Jupiter Swap API Error:", error);
+     return null;
+  }
+
+  return swapTransaction;
+};
+
+export const signAndSend = async (connection: Connection, wallet: Keypair, swapTransaction: string) => {
+  // 3. Deserialize and Sign
+  const swapTransactionBuf = Buffer.from(swapTransaction, 'base64');
+  var transaction = VersionedTransaction.deserialize(swapTransactionBuf);
+  transaction.sign([wallet]);
+
+  // 4. Execute
+  const txid = await connection.sendTransaction(transaction);
+  console.log(`🚀 Trade Sent! View on Solscan: https://solscan.io/tx/${txid}`);
 };
 
 if (!PRIVATE_KEY) {
@@ -259,58 +306,13 @@ async function executeSwap(jupiterQuoteApi: any, connection: Connection, wallet:
   console.log(`Executing Swap: ${finalAmount} from ${decision.inputMint} to ${decision.outputMint}`);
 
   try {
-    // 1. Get Quote
-    const quoteResponse = await jupiterQuoteApi.quoteGet({
-      inputMint: decision.inputMint,
-      outputMint: decision.outputMint,
-      amount: finalAmount,
-      slippageBps: 50, // 0.5% slippage
-    });
-    if (!quoteResponse) {
-      console.error("Failed to get quote for swap.");
-      return;
+    const swapTransaction = await getSwapTransaction(wallet, decision.inputMint, decision.outputMint, finalAmount);
+    if (!swapTransaction) {
+       console.error("Failed to obtain swap transaction from Jupiter.");
+       return;
     }
 
-    // 2. Get Swap Transaction
-    // Use the older v6 API endpoint directly as a fallback if the SDK is missing the method or has a different signature.
-    // The @jup-ag/api SDK's swapPost method signature often changes. Using node-fetch is more stable.
-    const swapData = await (
-      await fetch('https://quote-api.jup.ag/v6/swap', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          quoteResponse,
-          userPublicKey: wallet.publicKey.toString(),
-          wrapAndUnwrapSol: true,
-          computeUnitPriceMicroLamports: 100000, // 100,000 micro-lamports priority fee
-        })
-      })
-    ).json();
-
-    if (!swapData.swapTransaction) {
-      console.error("Failed to get swap transaction:", swapData);
-      return;
-    }
-
-    // 3. Deserialize and Sign
-    const swapTransactionBuf = Buffer.from(swapData.swapTransaction, 'base64');
-    let transaction = VersionedTransaction.deserialize(swapTransactionBuf);
-
-    transaction.sign([wallet]);
-
-    // 4. Execute Transaction
-    console.log("Sending transaction...");
-    const rawTransaction = transaction.serialize();
-    const txid = await connection.sendRawTransaction(rawTransaction, {
-      skipPreflight: true,
-      maxRetries: 2
-    });
-
-    console.log(`Swap Executed Successfully! Transaction ID: ${txid}`);
-    console.log(`Explorer Link: https://solscan.io/tx/${txid}`);
-
+    await signAndSend(connection, wallet, swapTransaction);
   } catch (error) {
     console.error("Error executing swap:", error);
   }
