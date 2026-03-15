@@ -10,6 +10,7 @@ dotenv.config();
 const RPC_URL = process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
 const PRIVATE_KEY = process.env.PHANTOM_PRIVATE_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY;
 
 // Constants (Tokens)
 const TOKENS = {
@@ -23,6 +24,10 @@ if (!PRIVATE_KEY) {
 
 if (!OPENAI_API_KEY) {
   console.warn("WARNING: OPENAI_API_KEY is not set. The bot's AI decision making will fail.");
+}
+
+if (!BIRDEYE_API_KEY) {
+  console.warn("WARNING: BIRDEYE_API_KEY is not set. Token trend analysis will fail.");
 }
 
 export const checkBalance = async (connection: Connection, publicKey: PublicKey) => {
@@ -39,6 +44,67 @@ export const getPhantomWallet = () => {
   // Decode the Base58 string from Phantom into a Uint8Array
   const secretKey = bs58.decode(privateKeyString);
   return Keypair.fromSecretKey(secretKey);
+};
+
+export const fetchBirdeyeTrend = async (mintAddress: string) => {
+  if (!BIRDEYE_API_KEY) {
+    console.warn("Skipping Birdeye trend analysis because BIRDEYE_API_KEY is not set.");
+    return null;
+  }
+
+  // Get UNIX timestamp in seconds for the last 5 minutes
+  const now = Math.floor(Date.now() / 1000);
+  const fiveMinsAgo = now - (5 * 60);
+
+  try {
+    const response = await fetch(`https://public-api.birdeye.so/defi/history_price?address=${mintAddress}&address_type=token&type=1m&time_from=${fiveMinsAgo}&time_to=${now}`, {
+      headers: {
+        'X-API-KEY': BIRDEYE_API_KEY,
+        'Accept': 'application/json'
+      }
+    });
+
+    const data = await response.json();
+    if (data.success && data.data && data.data.items.length > 0) {
+      console.log(`📊 5-Minute Trend for ${mintAddress}: Fetched ${data.data.items.length} price points.`);
+      return data.data.items;
+    } else {
+      console.log(`📉 No recent trend data found for ${mintAddress} on Birdeye.`);
+      return null;
+    }
+  } catch (error: any) {
+    console.error(`Failed to fetch Birdeye trend for ${mintAddress}:`, error?.message || error);
+    return null;
+  }
+};
+
+export const monitorSerumForNewMarkets = (connection: Connection) => {
+  // Common Serum / OpenBook program ID on mainnet
+  const SERUM_PROGRAM_ID = new PublicKey("srmqPvymZyRtxMuTX5X57X8fT6C5s8xWbL3h1TfFqB1"); // OpenBook v3
+  console.log(`📡 Listening for new markets on Serum program: ${SERUM_PROGRAM_ID.toBase58()}`);
+
+  connection.onLogs(
+    SERUM_PROGRAM_ID,
+    async (logs, ctx) => {
+      // Simplified check for market initialization logs
+      if (logs.logs.some(log => log.includes("InitializeMarket") || log.includes("InitMarket"))) {
+        console.log(`🔥 Potential new market detected! Signature: ${logs.signature}`);
+
+        // Placeholder for extracting the mint address from the transaction
+        const dummyMintAddress = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"; // Example: BONK
+
+        console.log(`🔍 Checking if mint ${dummyMintAddress} is verified...`);
+        // Placeholder verification logic (e.g. checking Token Metadata program)
+        const isVerified = true;
+
+        if (isVerified) {
+          console.log(`✅ Mint ${dummyMintAddress} verified. Fetching Birdeye trends...`);
+          await fetchBirdeyeTrend(dummyMintAddress);
+        }
+      }
+    },
+    "confirmed"
+  );
 };
 
 export const run = async () => {
@@ -71,7 +137,10 @@ export const run = async () => {
   const jupiterQuoteApi = createJupiterApiClient();
   console.log("Jupiter API ready for use.");
 
-  // 5. Bot Logic Loop
+  // 5. Start Sniping Event Listener
+  monitorSerumForNewMarkets(connection);
+
+  // 6. Bot Logic Loop
   if (wallet && OPENAI_API_KEY) {
     console.log("Starting AI Trading Loop...");
     await startTradingLoop(connection, wallet, jupiterQuoteApi);
@@ -146,17 +215,27 @@ async function analyzeMarketAndDecide(jupiterQuoteApi: any) {
 }
 
 async function executeSwap(jupiterQuoteApi: any, connection: Connection, wallet: Keypair, decision: any) {
-  console.log(`Executing Swap: ${decision.amount} from ${decision.inputMint} to ${decision.outputMint}`);
+  let finalAmount = decision.amount;
+
+  // Implement Max Buy Limit of 0.1 SOL per trade
+  if (decision.inputMint === TOKENS.SOL) {
+    const MAX_BUY_LAMPORTS = 0.1 * LAMPORTS_PER_SOL;
+    if (finalAmount > MAX_BUY_LAMPORTS) {
+      console.warn(`⚠️ Max Buy Limit Exceeded! Capping trade amount from ${finalAmount / LAMPORTS_PER_SOL} SOL to 0.1 SOL.`);
+      finalAmount = MAX_BUY_LAMPORTS;
+    }
+  }
+
+  console.log(`Executing Swap: ${finalAmount} from ${decision.inputMint} to ${decision.outputMint}`);
 
   try {
     // 1. Get Quote
     const quoteResponse = await jupiterQuoteApi.quoteGet({
       inputMint: decision.inputMint,
       outputMint: decision.outputMint,
-      amount: decision.amount,
+      amount: finalAmount,
       slippageBps: 50, // 0.5% slippage
     });
-
     if (!quoteResponse) {
       console.error("Failed to get quote for swap.");
       return;
