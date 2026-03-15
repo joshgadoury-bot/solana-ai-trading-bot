@@ -1,14 +1,14 @@
+import dotenv from 'dotenv';
+dotenv.config(); // Ensure variables are loaded before any other imports that might rely on them
+
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, VersionedTransaction, ParsedAccountData } from '@solana/web3.js';
 import bs58 from 'bs58';
 import fetch from 'cross-fetch';
 import { createJupiterApiClient } from '@jup-ag/api';
 import { getAssociatedTokenAddress, getAccount } from '@solana/spl-token';
 import { OpenAI } from 'openai';
-import dotenv from 'dotenv';
 import { startScanner } from './scanner';
 import { monitorPosition } from './monitor';
-
-dotenv.config();
 
 // Configuration
 const RPC_URL = process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
@@ -100,7 +100,7 @@ export const signAndSend = async (connection: Connection, wallet: Keypair, swapT
 };
 
 if (!PRIVATE_KEY) {
-  console.warn("WARNING: PHANTOM_PRIVATE_KEY is not set in the .env file. The bot will not be able to execute trades.");
+  console.warn("WARNING: PHANTOM_PRIVATE_KEY is not set in the environment variables. The bot will not be able to execute trades.");
 }
 
 if (!OPENAI_API_KEY) {
@@ -241,7 +241,7 @@ export const renderDashboard = () => {
 
 export const getPhantomWallet = () => {
   const privateKeyString = process.env.PHANTOM_PRIVATE_KEY;
-  if (!privateKeyString) throw new Error("Missing PHANTOM_PRIVATE_KEY in .env");
+  if (!privateKeyString) throw new Error("Missing PHANTOM_PRIVATE_KEY in environment variables");
 
   // Decode the Base58 string from Phantom into a Uint8Array
   const secretKey = bs58.decode(privateKeyString);
