@@ -85,6 +85,33 @@ export interface SecurityReport {
   reason?: string;
 }
 
+export const checkRugCheck = async (mintAddress: string) => {
+  try {
+    const response = await fetch(`https://api.rugcheck.xyz/v1/tokens/${mintAddress}/report/summary`);
+    if (!response.ok) {
+      console.warn(`⚠️ Could not reach RugCheck API for ${mintAddress}. Proceeding with caution.`);
+      return true; // Default to true if API is down, but you might want this to be false in production
+    }
+
+    const data = await response.json();
+
+    // Some endpoints return 'score', others might return a different structure.
+    // Based on common rugcheck summary formats:
+    const trustScore = data?.score || 0;
+
+    if (trustScore < 80) {
+      console.warn(`🚨 WARNING: Mint ${mintAddress} has a low RugCheck Trust Score (${trustScore}/100).`);
+      return false; // Unsafe
+    }
+
+    console.log(`✅ Mint ${mintAddress} has a good RugCheck Trust Score (${trustScore}/100).`);
+    return true; // Safe
+  } catch (error: any) {
+    console.error(`Error fetching RugCheck score for ${mintAddress}:`, error?.message || error);
+    return false; // Fail safe: Assume unsafe if we error out
+  }
+};
+
 export const checkTokenSafety = async (
   connection: Connection,
   mintAddress: string
@@ -109,7 +136,19 @@ export const checkTokenSafety = async (
       return { isSafe: false, reason: "Freeze Authority is still ENABLED. (Honeypot Risk)" };
     }
 
-    // 3. LP BURN CHECK (2026 Strategy)
+    // 3. TOKEN-2022 PERMANENT DELEGATE CHECK
+    const ownerProgram = accountInfo?.value?.owner?.toBase58();
+    if (ownerProgram === "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb") { // Token-2022 Program ID
+      const extensions = (accountInfo?.value?.data as ParsedAccountData)?.parsed?.info?.extensions;
+      if (extensions && Array.isArray(extensions)) {
+        const hasPermanentDelegate = extensions.some((ext: any) => ext.extension === 'permanentDelegate');
+        if (hasPermanentDelegate) {
+          return { isSafe: false, reason: "Token-2022 Permanent Delegate is ENABLED. (Creator can drain your tokens)" };
+        }
+      }
+    }
+
+    // 4. LP BURN CHECK (2026 Strategy)
     // Note: For a true audit, Jules would check the Raydium/Orca LP pair
     // to ensure the Liquidity Provider tokens are sent to a "Dead" address.
 
@@ -258,18 +297,23 @@ export const monitorSerumForNewMarkets = (connection: Connection, wallet: Keypai
              const securityReport = await checkTokenSafety(connection, baseMintAddress);
 
              if (securityReport.isSafe) {
-               console.log(`Fetching 1-minute Birdeye trend for ${baseMintAddress}...`);
-               const trendData = await fetchBirdeyeTrend(baseMintAddress);
-               if (trendData) {
-                 const isSpiking = checkPriceSpike(trendData);
-                 if (isSpiking) {
-                   console.log(`🎯 Triggering snipe trade for ${baseMintAddress}!`);
-                   await executeSwap(jupiterQuoteApi, connection, wallet, {
-                     inputMint: TOKENS.SOL,
-                     outputMint: baseMintAddress,
-                     amount: 0.1 * LAMPORTS_PER_SOL // Sniper buys max 0.1 SOL immediately
-                   });
+               const isRugCheckSafe = await checkRugCheck(baseMintAddress);
+               if (isRugCheckSafe) {
+                 console.log(`Fetching 1-minute Birdeye trend for ${baseMintAddress}...`);
+                 const trendData = await fetchBirdeyeTrend(baseMintAddress);
+                 if (trendData) {
+                   const isSpiking = checkPriceSpike(trendData);
+                   if (isSpiking) {
+                     console.log(`🎯 Triggering snipe trade for ${baseMintAddress}!`);
+                     await executeSwap(jupiterQuoteApi, connection, wallet, {
+                       inputMint: TOKENS.SOL,
+                       outputMint: baseMintAddress,
+                       amount: 0.1 * LAMPORTS_PER_SOL // Sniper buys max 0.1 SOL immediately
+                     });
+                   }
                  }
+               } else {
+                 console.log(`🚫 Ignoring token ${baseMintAddress}: Failed RugCheck.xyz Trust Score.`);
                }
              } else {
                console.log(`🚫 Ignoring unsafe token: ${baseMintAddress}. Reason: ${securityReport.reason}`);
@@ -414,6 +458,14 @@ async function executeSwap(jupiterQuoteApi: any, connection: Connection, wallet:
     if (!securityReport.isSafe) {
       console.error(`🚨 TRADE CANCELLED! Token ${decision.outputMint} is unsafe. Reason: ${securityReport.reason}`);
       return;
+    }
+
+    // MANDATORY RUGCHECK.XYZ TRUST SCORE CHECK
+    console.log(`🛡️  Checking RugCheck score for ${decision.outputMint}...`);
+    const isRugCheckSafe = await checkRugCheck(decision.outputMint);
+    if (!isRugCheckSafe) {
+       console.error(`🚨 TRADE CANCELLED! Token ${decision.outputMint} failed RugCheck.xyz Trust Score (< 80).`);
+       return;
     }
   }
 
