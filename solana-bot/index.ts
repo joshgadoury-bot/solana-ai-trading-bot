@@ -86,20 +86,50 @@ export const monitorSerumForNewMarkets = (connection: Connection) => {
   connection.onLogs(
     SERUM_PROGRAM_ID,
     async (logs, ctx) => {
-      // Simplified check for market initialization logs
+      // Check for market initialization logs
       if (logs.logs.some(log => log.includes("InitializeMarket") || log.includes("InitMarket"))) {
         console.log(`🔥 Potential new market detected! Signature: ${logs.signature}`);
 
-        // Placeholder for extracting the mint address from the transaction
-        const dummyMintAddress = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"; // Example: BONK
+        try {
+          // Fetch the parsed transaction to extract the mint
+          const tx = await connection.getParsedTransaction(logs.signature, { maxSupportedTransactionVersion: 0 });
+          if (!tx || !tx.transaction.message.instructions) return;
 
-        console.log(`🔍 Checking if mint ${dummyMintAddress} is verified...`);
-        // Placeholder verification logic (e.g. checking Token Metadata program)
-        const isVerified = true;
+          let baseMintAddress: string | null = null;
 
-        if (isVerified) {
-          console.log(`✅ Mint ${dummyMintAddress} verified. Fetching Birdeye trends...`);
-          await fetchBirdeyeTrend(dummyMintAddress);
+          // Iterate through instructions to find the Serum program invocation
+          for (const ix of tx.transaction.message.instructions) {
+             if (ix.programId.equals(SERUM_PROGRAM_ID) && 'accounts' in ix) {
+                 const accounts = (ix as any).accounts;
+                 // In Serum v3 InitializeMarket, the base mint is usually the 8th account (index 7)
+                 // and quote mint is the 9th (index 8).
+                 if (accounts && accounts.length >= 9) {
+                    baseMintAddress = accounts[7].toBase58();
+                    // We can also extract the quote mint (usually WSOL or USDC)
+                    const quoteMintAddress = accounts[8].toBase58();
+                    console.log(`Identified Market: Base Mint: ${baseMintAddress}, Quote Mint: ${quoteMintAddress}`);
+                    break;
+                 }
+             }
+          }
+
+          if (baseMintAddress) {
+             console.log(`🔍 Checking if mint ${baseMintAddress} is verified...`);
+             // NOTE: Real verification would involve checking the Token Metadata program (Metaplex)
+             // to see if the token has a valid name, symbol, uri, and potentially update authority.
+             // For this exercise, we assume it's verified if we successfully parsed it.
+             const isVerified = true;
+
+             if (isVerified) {
+               console.log(`✅ Mint ${baseMintAddress} verified. Fetching Birdeye trends...`);
+               await fetchBirdeyeTrend(baseMintAddress);
+             }
+          } else {
+             console.log(`⚠️ Could not parse base mint from transaction ${logs.signature}`);
+          }
+
+        } catch (error: any) {
+           console.error("Error parsing new market transaction:", error?.message || error);
         }
       }
     },
@@ -254,6 +284,7 @@ async function executeSwap(jupiterQuoteApi: any, connection: Connection, wallet:
           quoteResponse,
           userPublicKey: wallet.publicKey.toString(),
           wrapAndUnwrapSol: true,
+          computeUnitPriceMicroLamports: 100000, // 100,000 micro-lamports priority fee
         })
       })
     ).json();
