@@ -198,12 +198,15 @@ export const fetchBirdeyeTrend = async (mintAddress: string) => {
 export const checkPriceSpike = (trendData: any[]) => {
   if (!trendData || trendData.length < 2) return false;
 
-  const oldestPrice = trendData[0].value;
+  // We want to check for a 5% spike in the *last 1 minute*.
+  // Since each data point is a 1-minute candle, we compare the current price (newest)
+  // to the price from 1 minute ago.
+  const priceOneMinAgo = trendData[trendData.length - 2].value;
   const newestPrice = trendData[trendData.length - 1].value;
 
-  if (!oldestPrice || !newestPrice || oldestPrice === 0) return false;
+  if (!priceOneMinAgo || !newestPrice || priceOneMinAgo === 0) return false;
 
-  const percentIncrease = ((newestPrice - oldestPrice) / oldestPrice) * 100;
+  const percentIncrease = ((newestPrice - priceOneMinAgo) / priceOneMinAgo) * 100;
 
   if (percentIncrease >= 5) {
     console.log(`🚀 PRICE SPIKE DETECTED! Increased by ${percentIncrease.toFixed(2)}% in the last 1 minute.`);
@@ -402,6 +405,15 @@ async function executeSwap(jupiterQuoteApi: any, connection: Connection, wallet:
     if (finalAmount > MAX_BUY_LAMPORTS) {
       console.warn(`⚠️ Max Buy Limit Exceeded! Capping trade amount from ${finalAmount / LAMPORTS_PER_SOL} SOL to 0.1 SOL.`);
       finalAmount = MAX_BUY_LAMPORTS;
+    }
+
+    // MANDATORY SECURITY CHECK BEFORE BUYING A NEW TOKEN
+    console.log(`🛡️  Checking safety for ${decision.outputMint} before executing swap...`);
+    const securityReport = await checkTokenSafety(connection, decision.outputMint);
+
+    if (!securityReport.isSafe) {
+      console.error(`🚨 TRADE CANCELLED! Token ${decision.outputMint} is unsafe. Reason: ${securityReport.reason}`);
+      return;
     }
   }
 
