@@ -1,0 +1,19 @@
+services:
+  - type: worker
+    name: solana-ai-trading-bot
+    env: node
+    buildCommand: "cd solana-bot && npm install"
+    startCommand: "cd solana-bot && npm start"
+    envVars:
+      - key: NODE_VERSION
+        value: 22.16.0
+      - key: PHANTOM_PRIVATE_KEY
+        sync: false
+      - key: SOLANA_RPC_URL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: BIRDEYE_API_KEY
+        sync: false
+      - key: GRPC_ENDPOINT
+        sync: false
