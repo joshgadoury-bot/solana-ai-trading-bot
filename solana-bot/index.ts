@@ -24,11 +24,24 @@ const TOKENS = {
 
 const JUPITER_API = "https://quote-api.jup.ag/v6";
 
+export const getDynamicPriorityFee = async (connection: Connection) => {
+  const recentFees = await connection.getRecentPrioritizationFees();
+  if (recentFees.length === 0) return 1000; // Fallback
+
+  // Get the 50th percentile (median) fee to be competitive but not overpay
+  const sortedFees = recentFees.map(f => f.prioritizationFee).sort((a, b) => a - b);
+  const medianFee = sortedFees[Math.floor(sortedFees.length * 0.5)] || 0;
+
+  // Minimum of 5000 to ensure landing
+  return Math.max(medianFee, 5000);
+};
+
 export const getSwapTransaction = async (
   wallet: Keypair,
   inputMint: string,
   outputMint: string,
-  amountInLamports: number
+  amountInLamports: number,
+  priorityFee: number
 ) => {
   // 1. Get the best price (Quote)
   const quoteResponse = await fetch(
@@ -44,7 +57,7 @@ export const getSwapTransaction = async (
       userPublicKey: wallet.publicKey.toString(),
       wrapAndUnwrapSol: true,
       // 2026 Pro Tip: Set high priority to beat other bots
-      prioritizationFeeLamports: 100000
+      computeUnitPriceMicroLamports: priorityFee
     })
   });
 
@@ -477,7 +490,8 @@ async function executeSwap(jupiterQuoteApi: any, connection: Connection, wallet:
   console.log(`Executing Swap: ${finalAmount} from ${decision.inputMint} to ${decision.outputMint}`);
 
   try {
-    const swapTransaction = await getSwapTransaction(wallet, decision.inputMint, decision.outputMint, finalAmount);
+    const priorityFee = await getDynamicPriorityFee(connection);
+    const swapTransaction = await getSwapTransaction(wallet, decision.inputMint, decision.outputMint, finalAmount, priorityFee);
     if (!swapTransaction) {
        console.error("Failed to obtain swap transaction from Jupiter.");
        return false;
