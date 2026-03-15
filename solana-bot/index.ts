@@ -290,7 +290,7 @@ export const run = async () => {
 
   // 5. Start Sniping Event Listener
   if (wallet) {
-    startScanner(connection, async (mintAddress: string) => {
+    await startScanner(connection, async (mintAddress: string) => {
        console.log(`🔍 Checking Safety for Mint: ${mintAddress}...`);
 
        const securityReport = await checkTokenSafety(connection, mintAddress);

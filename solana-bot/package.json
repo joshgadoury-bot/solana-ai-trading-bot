@@ -14,6 +14,7 @@
     "@jup-ag/api": "^6.0.48",
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
+    "@triton-one/yellowstone-grpc": "^5.0.3",
     "@types/node": "^20.0.0",
     "bs58": "^5.0.0",
     "cross-fetch": "^4.1.0",
