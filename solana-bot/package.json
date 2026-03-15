@@ -1,11 +1,15 @@
 {
   "name": "solana-ai-trading-bot",
   "version": "1.0.0",
-  "description": "AI Trading Bot for Solana using Phantom and Jupiter",
+  "description": "AI Trading Bot for Solana",
   "main": "index.ts",
+  "engines": {
+    "node": ">=22.16.0 <23.0.0"
+  },
   "scripts": {
     "test": "ts-node test.ts",
     "start": "ts-node index.ts",
+    "build": "npm install",
     "dev": "ts-node-dev --respawn index.ts"
   },
   "keywords": [],
