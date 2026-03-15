@@ -2,9 +2,11 @@ import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, VersionedTransaction,
 import bs58 from 'bs58';
 import fetch from 'cross-fetch';
 import { createJupiterApiClient } from '@jup-ag/api';
+import { getAssociatedTokenAddress, getAccount } from '@solana/spl-token';
 import { OpenAI } from 'openai';
 import dotenv from 'dotenv';
 import { startScanner } from './scanner';
+import { monitorPosition } from './monitor';
 
 dotenv.config();
 
@@ -178,6 +180,17 @@ export const checkBalance = async (connection: Connection, publicKey: PublicKey)
   return balance;
 };
 
+export const getTokenBalance = async (connection: Connection, walletAddress: PublicKey, mintAddress: PublicKey) => {
+  try {
+    const ata = await getAssociatedTokenAddress(mintAddress, walletAddress);
+    const accountInfo = await getAccount(connection, ata);
+    return Number(accountInfo.amount); // amount is in raw smallest units
+  } catch (e) {
+    // Return 0 if the ATA doesn't exist or isn't funded
+    return 0;
+  }
+};
+
 export const renderDashboard = () => {
   const profitLoss = currentBalanceSol - initialBalanceSol;
   const plPercentage = initialBalanceSol > 0 ? (profitLoss / initialBalanceSol) * 100 : 0;
@@ -306,11 +319,32 @@ export const run = async () => {
              const isSpiking = checkPriceSpike(trendData);
              if (isSpiking) {
                console.log(`🎯 Triggering snipe trade for ${mintAddress}!`);
-               await executeSwap(jupiterQuoteApi, connection, wallet!, {
+               const buySuccess = await executeSwap(jupiterQuoteApi, connection, wallet!, {
                  inputMint: TOKENS.SOL,
                  outputMint: mintAddress,
                  amount: 0.1 * LAMPORTS_PER_SOL // Sniper buys max 0.1 SOL immediately
                });
+
+               if (buySuccess) {
+                 // Fetch the current entry price to begin monitoring
+                 const entryData = await fetch(`https://price.jup.ag/v4/price?ids=${mintAddress}`).then(res => res.json());
+                 if (entryData.data && entryData.data[mintAddress]) {
+                    const entryPrice = entryData.data[mintAddress].price;
+                    const action = await monitorPosition(mintAddress, entryPrice, 20, 10);
+
+                    if (action === "SELL") {
+                        const tokenBalance = await getTokenBalance(connection, wallet.publicKey, new PublicKey(mintAddress));
+                        if (tokenBalance > 0) {
+                           console.log(`Selling full balance of ${mintAddress}`);
+                           await executeSwap(jupiterQuoteApi, connection, wallet!, {
+                             inputMint: mintAddress,
+                             outputMint: TOKENS.SOL,
+                             amount: tokenBalance // Sell entire bag back to SOL
+                           });
+                        }
+                    }
+                 }
+               }
              }
            }
          } else {
@@ -431,12 +465,14 @@ async function executeSwap(jupiterQuoteApi: any, connection: Connection, wallet:
     const swapTransaction = await getSwapTransaction(wallet, decision.inputMint, decision.outputMint, finalAmount);
     if (!swapTransaction) {
        console.error("Failed to obtain swap transaction from Jupiter.");
-       return;
+       return false;
     }
 
     await signAndSend(connection, wallet, swapTransaction);
+    return true; // Successfully executed swap
   } catch (error) {
     console.error("Error executing swap:", error);
+    return false;
   }
 }
 
@@ -451,7 +487,28 @@ async function startTradingLoop(connection: Connection, wallet: Keypair, jupiter
 
       const decision = await analyzeMarketAndDecide(jupiterQuoteApi);
       if (decision && decision.action === "SWAP") {
-        await executeSwap(jupiterQuoteApi, connection, wallet, decision);
+        const buySuccess = await executeSwap(jupiterQuoteApi, connection, wallet, decision);
+
+        // If we bought a token with SOL, monitor it
+        if (buySuccess && decision.inputMint === TOKENS.SOL && decision.outputMint !== TOKENS.USDC) {
+             const entryData = await fetch(`https://price.jup.ag/v4/price?ids=${decision.outputMint}`).then(res => res.json());
+             if (entryData.data && entryData.data[decision.outputMint]) {
+                const entryPrice = entryData.data[decision.outputMint].price;
+                const action = await monitorPosition(decision.outputMint, entryPrice, 20, 10);
+
+                if (action === "SELL") {
+                    const tokenBalance = await getTokenBalance(connection, wallet.publicKey, new PublicKey(decision.outputMint));
+                    if (tokenBalance > 0) {
+                       console.log(`Selling full balance of ${decision.outputMint}`);
+                       await executeSwap(jupiterQuoteApi, connection, wallet, {
+                         inputMint: decision.outputMint,
+                         outputMint: TOKENS.SOL,
+                         amount: tokenBalance // Sell entire bag back to SOL
+                       });
+                    }
+                }
+             }
+        }
       }
     } catch (error) {
       console.error("Error in trading loop:", error);
