@@ -1,8 +1,7 @@
-import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, VersionedTransaction } from '@solana/web3.js';
+import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, VersionedTransaction, ParsedAccountData } from '@solana/web3.js';
 import bs58 from 'bs58';
 import fetch from 'cross-fetch';
 import { createJupiterApiClient } from '@jup-ag/api';
-import { getMint } from '@solana/spl-token';
 import { OpenAI } from 'openai';
 import dotenv from 'dotenv';
 
@@ -81,22 +80,44 @@ if (!BIRDEYE_API_KEY) {
   console.warn("WARNING: BIRDEYE_API_KEY is not set. Token trend analysis will fail.");
 }
 
-export const checkFreezeAuthority = async (connection: Connection, mintAddress: string) => {
-  try {
-    const mintPubkey = new PublicKey(mintAddress);
-    const mintInfo = await getMint(connection, mintPubkey);
+export interface SecurityReport {
+  isSafe: boolean;
+  reason?: string;
+}
 
-    if (mintInfo.freezeAuthority !== null) {
-      console.warn(`🚨 WARNING: Mint ${mintAddress} has Freeze Authority ENABLED (Honeypot risk).`);
-      return true; // Is frozen/freezable
+export const checkTokenSafety = async (
+  connection: Connection,
+  mintAddress: string
+): Promise<SecurityReport> => {
+  try {
+    const mint = new PublicKey(mintAddress);
+    const accountInfo = await connection.getParsedAccountInfo(mint);
+
+    const data = (accountInfo?.value?.data as ParsedAccountData)?.parsed?.info;
+
+    if (!data) return { isSafe: false, reason: "Could not fetch mint data." };
+
+    // 1. MINT AUTHORITY CHECK (Is it a "printer"?)
+    // If this is NOT null, the creator can print infinite tokens and dump on you.
+    if (data.mintAuthority !== null) {
+      return { isSafe: false, reason: "Mint Authority is still ENABLED. (Infinite Supply Risk)" };
     }
 
-    console.log(`✅ Mint ${mintAddress} has Freeze Authority DISABLED.`);
-    return false; // Safe
+    // 2. FREEZE AUTHORITY CHECK (Can they lock your funds?)
+    // If this is NOT null, the creator can freeze your wallet so you can't sell.
+    if (data.freezeAuthority !== null) {
+      return { isSafe: false, reason: "Freeze Authority is still ENABLED. (Honeypot Risk)" };
+    }
+
+    // 3. LP BURN CHECK (2026 Strategy)
+    // Note: For a true audit, Jules would check the Raydium/Orca LP pair
+    // to ensure the Liquidity Provider tokens are sent to a "Dead" address.
+
+    console.log(`✅ Mint ${mintAddress} passed all safety checks.`);
+    return { isSafe: true };
   } catch (error: any) {
-    console.error(`Error checking freeze authority for ${mintAddress}:`, error?.message || error);
-    // Fail safe: If we can't check, assume it's unsafe.
-    return true;
+    console.error(`Error checking token safety for ${mintAddress}:`, error?.message || error);
+    return { isSafe: false, reason: "Error parsing token data on-chain." };
   }
 };
 
@@ -231,9 +252,9 @@ export const monitorSerumForNewMarkets = (connection: Connection, wallet: Keypai
           if (baseMintAddress) {
              console.log(`🔍 Checking Safety for Mint: ${baseMintAddress}...`);
 
-             const isFrozen = await checkFreezeAuthority(connection, baseMintAddress);
+             const securityReport = await checkTokenSafety(connection, baseMintAddress);
 
-             if (!isFrozen) {
+             if (securityReport.isSafe) {
                console.log(`Fetching 1-minute Birdeye trend for ${baseMintAddress}...`);
                const trendData = await fetchBirdeyeTrend(baseMintAddress);
                if (trendData) {
@@ -248,7 +269,7 @@ export const monitorSerumForNewMarkets = (connection: Connection, wallet: Keypai
                  }
                }
              } else {
-               console.log(`🚫 Ignoring unsafe token: ${baseMintAddress}`);
+               console.log(`🚫 Ignoring unsafe token: ${baseMintAddress}. Reason: ${securityReport.reason}`);
              }
           } else {
              console.log(`⚠️ Could not parse base mint from transaction ${logs.signature}`);
