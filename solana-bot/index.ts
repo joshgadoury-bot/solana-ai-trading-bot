@@ -116,30 +116,34 @@ export interface SecurityReport {
   reason?: string;
 }
 
-export const checkRugCheck = async (mintAddress: string) => {
+export const getRugCheckScore = async (mint: string) => {
   try {
-    const response = await fetch(`https://api.rugcheck.xyz/v1/tokens/${mintAddress}/report/summary`);
+    const response = await fetch(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`);
     if (!response.ok) {
-      console.warn(`⚠️ Could not reach RugCheck API for ${mintAddress}. Proceeding with caution.`);
-      return true; // Default to true if API is down, but you might want this to be false in production
+      console.warn(`⚠️ Could not reach RugCheck API for ${mint}. Proceeding with caution.`);
+      return { isSafe: true, score: 0, risks: [] }; // Default to true if API is down, but you might want this to be false in production
     }
 
     const data = await response.json();
 
-    // Some endpoints return 'score', others might return a different structure.
-    // Based on common rugcheck summary formats:
-    const trustScore = data?.score || 0;
+    const score = data.score || 0;
+    const risks = data.risks ? data.risks.map((r: any) => r.name) : [];
+    const isSafe = score < 1000;
 
-    if (trustScore < 80) {
-      console.warn(`🚨 WARNING: Mint ${mintAddress} has a low RugCheck Trust Score (${trustScore}/100).`);
-      return false; // Unsafe
+    if (!isSafe) {
+      console.warn(`🚨 WARNING: Mint ${mint} has a dangerous RugCheck Score (${score}). Risks: ${risks.join(', ')}`);
+    } else {
+      console.log(`✅ Mint ${mint} has a safe RugCheck Score (${score}).`);
     }
 
-    console.log(`✅ Mint ${mintAddress} has a good RugCheck Trust Score (${trustScore}/100).`);
-    return true; // Safe
+    return {
+      isSafe,
+      score,
+      risks
+    };
   } catch (error: any) {
-    console.error(`Error fetching RugCheck score for ${mintAddress}:`, error?.message || error);
-    return false; // Fail safe: Assume unsafe if we error out
+    console.error(`Error fetching RugCheck score for ${mint}:`, error?.message || error);
+    return { isSafe: false, score: 9999, risks: ["API Error"] }; // Fail safe: Assume unsafe if we error out
   }
 };
 
@@ -339,8 +343,8 @@ export const run = async () => {
        if (securityReport.isSafe) {
          console.log(`✅ BOTTING: ${mintAddress}`);
 
-         const isRugCheckSafe = await checkRugCheck(mintAddress);
-         if (isRugCheckSafe) {
+         const rugCheckReport = await getRugCheckScore(mintAddress);
+         if (rugCheckReport.isSafe) {
            console.log(`Fetching 1-minute Birdeye trend for ${mintAddress}...`);
            const trendData = await fetchBirdeyeTrend(mintAddress);
            if (trendData) {
@@ -376,7 +380,7 @@ export const run = async () => {
              }
            }
          } else {
-           console.log(`🚫 Ignoring token ${mintAddress}: Failed RugCheck.xyz Trust Score.`);
+           console.log(`🚫 Ignoring token ${mintAddress}: Failed RugCheck.xyz (Score: ${rugCheckReport.score}). Risks: ${rugCheckReport.risks.join(', ')}`);
          }
        } else {
          console.log(`❌ SKIPPING: ${securityReport.reason}`);
@@ -480,10 +484,10 @@ async function executeSwap(jupiterQuoteApi: any, connection: Connection, wallet:
 
     // MANDATORY RUGCHECK.XYZ TRUST SCORE CHECK
     console.log(`🛡️  Checking RugCheck score for ${decision.outputMint}...`);
-    const isRugCheckSafe = await checkRugCheck(decision.outputMint);
-    if (!isRugCheckSafe) {
-       console.error(`🚨 TRADE CANCELLED! Token ${decision.outputMint} failed RugCheck.xyz Trust Score (< 80).`);
-       return;
+    const rugCheckReport = await getRugCheckScore(decision.outputMint);
+    if (!rugCheckReport.isSafe) {
+       console.error(`🚨 TRADE CANCELLED! Token ${decision.outputMint} failed RugCheck.xyz (Score: ${rugCheckReport.score}). Risks: ${rugCheckReport.risks.join(', ')}`);
+       return false;
     }
   }
 
