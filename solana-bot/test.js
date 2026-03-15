@@ -1,6 +1,6 @@
 const assert = require('assert');
 const { Keypair } = require('@solana/web3.js');
-const bs58 = require('bs58').default || require('bs58');
+const bs58 = require('bs58');
 const { setupWallet } = require('./index');
 
 console.log("Running Tests...");
