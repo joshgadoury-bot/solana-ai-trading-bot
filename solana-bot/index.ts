@@ -2,6 +2,7 @@ import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, VersionedTransaction 
 import bs58 from 'bs58';
 import fetch from 'cross-fetch';
 import { createJupiterApiClient } from '@jup-ag/api';
+import { getMint } from '@solana/spl-token';
 import { OpenAI } from 'openai';
 import dotenv from 'dotenv';
 
@@ -63,6 +64,9 @@ export const signAndSend = async (connection: Connection, wallet: Keypair, swapT
   // 4. Execute
   const txid = await connection.sendTransaction(transaction);
   console.log(`🚀 Trade Sent! View on Solscan: https://solscan.io/tx/${txid}`);
+
+  // Update Trade count
+  totalTrades++;
 };
 
 if (!PRIVATE_KEY) {
@@ -77,11 +81,56 @@ if (!BIRDEYE_API_KEY) {
   console.warn("WARNING: BIRDEYE_API_KEY is not set. Token trend analysis will fail.");
 }
 
+export const checkFreezeAuthority = async (connection: Connection, mintAddress: string) => {
+  try {
+    const mintPubkey = new PublicKey(mintAddress);
+    const mintInfo = await getMint(connection, mintPubkey);
+
+    if (mintInfo.freezeAuthority !== null) {
+      console.warn(`🚨 WARNING: Mint ${mintAddress} has Freeze Authority ENABLED (Honeypot risk).`);
+      return true; // Is frozen/freezable
+    }
+
+    console.log(`✅ Mint ${mintAddress} has Freeze Authority DISABLED.`);
+    return false; // Safe
+  } catch (error: any) {
+    console.error(`Error checking freeze authority for ${mintAddress}:`, error?.message || error);
+    // Fail safe: If we can't check, assume it's unsafe.
+    return true;
+  }
+};
+
+// Dashboard State
+let initialBalanceSol = 0;
+let currentBalanceSol = 0;
+export let totalTrades = 0;
+
 export const checkBalance = async (connection: Connection, publicKey: PublicKey) => {
   const balance = await connection.getBalance(publicKey);
-  console.log(`🤖 Bot Wallet: ${publicKey.toBase58()}`);
-  console.log(`💰 Current Balance: ${balance / LAMPORTS_PER_SOL} SOL`);
+  const balanceSol = balance / LAMPORTS_PER_SOL;
+
+  if (initialBalanceSol === 0) {
+    initialBalanceSol = balanceSol;
+  }
+  currentBalanceSol = balanceSol;
+
   return balance;
+};
+
+export const renderDashboard = () => {
+  const profitLoss = currentBalanceSol - initialBalanceSol;
+  const plPercentage = initialBalanceSol > 0 ? (profitLoss / initialBalanceSol) * 100 : 0;
+  const plColor = profitLoss >= 0 ? '\x1b[32m' : '\x1b[31m'; // Green or Red
+  const resetColor = '\x1b[0m';
+
+  console.log(`\n=========================================`);
+  console.log(`📈  JULES AI SOLANA TRADING DASHBOARD  📈`);
+  console.log(`=========================================`);
+  console.log(`Started Balance:   ${initialBalanceSol.toFixed(4)} SOL`);
+  console.log(`Current Balance:   ${currentBalanceSol.toFixed(4)} SOL`);
+  console.log(`Total Trades:      ${totalTrades}`);
+  console.log(`Profit / Loss:     ${plColor}${profitLoss.toFixed(4)} SOL (${plPercentage.toFixed(2)}%)${resetColor}`);
+  console.log(`=========================================\n`);
 };
 
 export const getPhantomWallet = () => {
@@ -125,7 +174,26 @@ export const fetchBirdeyeTrend = async (mintAddress: string) => {
   }
 };
 
-export const monitorSerumForNewMarkets = (connection: Connection) => {
+export const checkPriceSpike = (trendData: any[]) => {
+  if (!trendData || trendData.length < 2) return false;
+
+  const oldestPrice = trendData[0].value;
+  const newestPrice = trendData[trendData.length - 1].value;
+
+  if (!oldestPrice || !newestPrice || oldestPrice === 0) return false;
+
+  const percentIncrease = ((newestPrice - oldestPrice) / oldestPrice) * 100;
+
+  if (percentIncrease >= 5) {
+    console.log(`🚀 PRICE SPIKE DETECTED! Increased by ${percentIncrease.toFixed(2)}% in the last 1 minute.`);
+    return true;
+  }
+
+  console.log(`📉 Normal movement. Price changed by ${percentIncrease.toFixed(2)}% in the last 1 minute.`);
+  return false;
+};
+
+export const monitorSerumForNewMarkets = (connection: Connection, wallet: Keypair, jupiterQuoteApi: any) => {
   // Common Serum / OpenBook program ID on mainnet
   const SERUM_PROGRAM_ID = new PublicKey("srmqPvymZyRtxMuTX5X57X8fT6C5s8xWbL3h1TfFqB1"); // OpenBook v3
   console.log(`📡 Listening for new markets on Serum program: ${SERUM_PROGRAM_ID.toBase58()}`);
@@ -161,15 +229,26 @@ export const monitorSerumForNewMarkets = (connection: Connection) => {
           }
 
           if (baseMintAddress) {
-             console.log(`🔍 Checking if mint ${baseMintAddress} is verified...`);
-             // NOTE: Real verification would involve checking the Token Metadata program (Metaplex)
-             // to see if the token has a valid name, symbol, uri, and potentially update authority.
-             // For this exercise, we assume it's verified if we successfully parsed it.
-             const isVerified = true;
+             console.log(`🔍 Checking Safety for Mint: ${baseMintAddress}...`);
 
-             if (isVerified) {
-               console.log(`✅ Mint ${baseMintAddress} verified. Fetching Birdeye trends...`);
-               await fetchBirdeyeTrend(baseMintAddress);
+             const isFrozen = await checkFreezeAuthority(connection, baseMintAddress);
+
+             if (!isFrozen) {
+               console.log(`Fetching 1-minute Birdeye trend for ${baseMintAddress}...`);
+               const trendData = await fetchBirdeyeTrend(baseMintAddress);
+               if (trendData) {
+                 const isSpiking = checkPriceSpike(trendData);
+                 if (isSpiking) {
+                   console.log(`🎯 Triggering snipe trade for ${baseMintAddress}!`);
+                   await executeSwap(jupiterQuoteApi, connection, wallet, {
+                     inputMint: TOKENS.SOL,
+                     outputMint: baseMintAddress,
+                     amount: 0.1 * LAMPORTS_PER_SOL // Sniper buys max 0.1 SOL immediately
+                   });
+                 }
+               }
+             } else {
+               console.log(`🚫 Ignoring unsafe token: ${baseMintAddress}`);
              }
           } else {
              console.log(`⚠️ Could not parse base mint from transaction ${logs.signature}`);
@@ -215,7 +294,9 @@ export const run = async () => {
   console.log("Jupiter API ready for use.");
 
   // 5. Start Sniping Event Listener
-  monitorSerumForNewMarkets(connection);
+  if (wallet) {
+    monitorSerumForNewMarkets(connection, wallet, jupiterQuoteApi);
+  }
 
   // 6. Bot Logic Loop
   if (wallet && OPENAI_API_KEY) {
@@ -324,6 +405,9 @@ async function startTradingLoop(connection: Connection, wallet: Keypair, jupiter
   // Sequential loop to prevent overlapping API calls
   while (true) {
     try {
+      await checkBalance(connection, wallet.publicKey);
+      renderDashboard();
+
       const decision = await analyzeMarketAndDecide(jupiterQuoteApi);
       if (decision && decision.action === "SWAP") {
         await executeSwap(jupiterQuoteApi, connection, wallet, decision);
