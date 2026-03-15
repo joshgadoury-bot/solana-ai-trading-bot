@@ -5,8 +5,8 @@ const { OpenAI } = require('openai');
 require('dotenv').config();
 
 // Configuration
-const RPC_URL = process.env.RPC_URL || "https://api.mainnet-beta.solana.com";
-const PRIVATE_KEY = process.env.SOLANA_PRIVATE_KEY;
+const RPC_URL = process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
+const PRIVATE_KEY = process.env.PHANTOM_PRIVATE_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 // Constants (Tokens)
@@ -16,7 +16,7 @@ const TOKENS = {
 };
 
 if (!PRIVATE_KEY) {
-  console.warn("WARNING: SOLANA_PRIVATE_KEY is not set in the .env file. The bot will not be able to execute trades.");
+  console.warn("WARNING: PHANTOM_PRIVATE_KEY is not set in the .env file. The bot will not be able to execute trades.");
 }
 
 if (!OPENAI_API_KEY) {
