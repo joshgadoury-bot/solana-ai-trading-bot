@@ -1,8 +1,10 @@
-const { Connection, Keypair } = require('@solana/web3.js');
-const bs58 = require('bs58');
-const { createJupiterApiClient } = require('@jup-ag/api');
-const { OpenAI } = require('openai');
-require('dotenv').config();
+import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, VersionedTransaction } from '@solana/web3.js';
+import bs58 from 'bs58';
+import { createJupiterApiClient } from '@jup-ag/api';
+import { OpenAI } from 'openai';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 // Configuration
 const RPC_URL = process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
@@ -23,34 +25,23 @@ if (!OPENAI_API_KEY) {
   console.warn("WARNING: OPENAI_API_KEY is not set. The bot's AI decision making will fail.");
 }
 
-async function checkBalance(connection, wallet) {
-  if (!wallet) return;
-  try {
-    const balance = await connection.getBalance(wallet.publicKey);
-    console.log(`Current Balance: ${(balance / 1e9).toFixed(4)} SOL`);
-  } catch (error) {
-    console.error("Failed to check balance:", error.message);
-  }
-}
+export const checkBalance = async (connection: Connection, publicKey: PublicKey) => {
+  const balance = await connection.getBalance(publicKey);
+  console.log(`🤖 Bot Wallet: ${publicKey.toBase58()}`);
+  console.log(`💰 Current Balance: ${balance / LAMPORTS_PER_SOL} SOL`);
+  return balance;
+};
 
-function setupWallet(privateKeyString) {
-  if (!privateKeyString) {
-    return null;
-  }
+export const getPhantomWallet = () => {
+  const privateKeyString = process.env.PHANTOM_PRIVATE_KEY;
+  if (!privateKeyString) throw new Error("Missing PHANTOM_PRIVATE_KEY in .env");
 
-  try {
-    // Phantom wallet exports private keys as base58 encoded strings.
-    const secretKey = bs58.decode(privateKeyString);
-    const keypair = Keypair.fromSecretKey(secretKey);
-    console.log(`Wallet connected: ${keypair.publicKey.toBase58()}`);
-    return keypair;
-  } catch (error) {
-    console.error("Invalid private key provided! Ensure it is a valid base58 string.");
-    return null;
-  }
-}
+  // Decode the Base58 string from Phantom into a Uint8Array
+  const secretKey = bs58.decode(privateKeyString);
+  return Keypair.fromSecretKey(secretKey);
+};
 
-async function main() {
+export const run = async () => {
   console.log("Starting Solana AI Trading Bot...");
 
   // 1. Setup Connection to Solana
@@ -60,18 +51,19 @@ async function main() {
   try {
     const version = await connection.getVersion();
     console.log("Connected successfully! Solana Core Version:", version['solana-core']);
-  } catch (error) {
-    console.error("Failed to connect to Solana RPC:", error.message);
+  } catch (error: any) {
+    console.error("Failed to connect to Solana RPC:", error?.message || error);
     return;
   }
 
-  // 2. Setup Wallet
-  const wallet = setupWallet(PRIVATE_KEY);
-  if (!wallet) {
-    console.log("Running in watch-only mode (No wallet configured).");
-  } else {
-    // 3. Check Balance
-    await checkBalance(connection, wallet);
+  // 2. Setup Wallet & 3. Check Balance
+  let wallet;
+  try {
+    wallet = getPhantomWallet();
+    await checkBalance(connection, wallet.publicKey);
+  } catch (error: any) {
+     console.error("Wallet setup failed:", error?.message || error);
+     console.log("Running in watch-only mode (No wallet configured).");
   }
 
   // 4. Initialize Jupiter API
@@ -84,9 +76,9 @@ async function main() {
     console.log("Starting AI Trading Loop...");
     await startTradingLoop(connection, wallet, jupiterQuoteApi);
   }
-}
+};
 
-async function analyzeMarketAndDecide(jupiterQuoteApi) {
+async function analyzeMarketAndDecide(jupiterQuoteApi: any) {
   if (!OPENAI_API_KEY) {
      console.error("No OPENAI_API_KEY configured. Skipping AI analysis.");
      return null;
@@ -95,14 +87,14 @@ async function analyzeMarketAndDecide(jupiterQuoteApi) {
   // 1. Fetch Real Market Data (SOL/USDC Price)
   let solPriceData = "Unknown";
   try {
-      const priceResponse = await fetch(`https://price.jup.ag/v6/price?ids=SOL`);
+      const priceResponse = await fetch(`https://price.jup.ag/v4/price?ids=SOL`);
       const priceJson = await priceResponse.json();
       if (priceJson.data && priceJson.data.SOL) {
           solPriceData = priceJson.data.SOL.price;
           console.log(`Current SOL Price (Jupiter): $${solPriceData}`);
       }
-  } catch(e) {
-      console.error("Failed to fetch market data:", e.message);
+  } catch(e: any) {
+      console.error("Failed to fetch market data:", e?.message || e);
   }
 
   const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
@@ -124,7 +116,8 @@ async function analyzeMarketAndDecide(jupiterQuoteApi) {
       response_format: { type: "json_object" }
     });
 
-    const decisionStr = response.choices[0].message.content;
+    const decisionStr = response.choices[0]?.message?.content;
+    if (!decisionStr) return null;
     const aiDecision = JSON.parse(decisionStr);
     console.log("AI Decision:", aiDecision);
 
@@ -146,15 +139,13 @@ async function analyzeMarketAndDecide(jupiterQuoteApi) {
        console.log("AI decided to HOLD.");
        return null;
     }
-  } catch (error) {
-     console.error("AI Analysis failed:", error.message);
+  } catch (error: any) {
+     console.error("AI Analysis failed:", error?.message || error);
      return null;
   }
 }
 
-const { VersionedTransaction } = require('@solana/web3.js');
-
-async function executeSwap(jupiterQuoteApi, connection, wallet, decision) {
+async function executeSwap(jupiterQuoteApi: any, connection: Connection, wallet: Keypair, decision: any) {
   console.log(`Executing Swap: ${decision.amount} from ${decision.inputMint} to ${decision.outputMint}`);
 
   try {
@@ -215,9 +206,11 @@ async function executeSwap(jupiterQuoteApi, connection, wallet, decision) {
   }
 }
 
-async function startTradingLoop(connection, wallet, jupiterQuoteApi) {
-  // Simple periodic loop
-  setInterval(async () => {
+async function startTradingLoop(connection: Connection, wallet: Keypair, jupiterQuoteApi: any) {
+  const loopDelay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+  // Sequential loop to prevent overlapping API calls
+  while (true) {
     try {
       const decision = await analyzeMarketAndDecide(jupiterQuoteApi);
       if (decision && decision.action === "SWAP") {
@@ -226,17 +219,10 @@ async function startTradingLoop(connection, wallet, jupiterQuoteApi) {
     } catch (error) {
       console.error("Error in trading loop:", error);
     }
-  }, 10000); // Run every 10 seconds
+    await loopDelay(10000); // Run every 10 seconds
+  }
 }
 
 if (require.main === module) {
-  main().catch(console.error);
+  run().catch(console.error);
 }
-
-module.exports = {
-  main,
-  setupWallet,
-  checkBalance,
-  analyzeMarketAndDecide,
-  executeSwap
-};

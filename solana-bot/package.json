@@ -2,19 +2,22 @@
   "name": "solana-bot",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "index.ts",
   "scripts": {
-    "test": "node test.js"
+    "test": "ts-node test.ts",
+    "start": "ts-node index.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
     "@jup-ag/api": "^6.0.48",
     "@solana/web3.js": "^1.98.4",
+    "@types/node": "^20.0.0",
     "bs58": "^5.0.0",
-    "dotenv": "^17.3.1",
-    "openai": "^6.29.0"
+    "dotenv": "^16.4.5",
+    "openai": "^4.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
   }
 }
