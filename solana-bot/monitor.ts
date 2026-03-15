@@ -8,7 +8,9 @@ export const monitorPosition = async (
   takeProfitPct: number, // e.g., 20 for 20%
   stopLossPct: number    // e.g., 10 for 10%
 ): Promise<string> => {
-  console.log(`📈 Monitoring ${tokenMint} | Entry: $${entryPrice.toFixed(6)} | TP: +${takeProfitPct}% | SL: -${stopLossPct}%`);
+  let highestPrice = entryPrice; // Track ATH for Trailing Stop-Loss
+
+  console.log(`📈 Monitoring ${tokenMint} | Entry: $${entryPrice.toFixed(6)} | TP: +${takeProfitPct}% | Trailing SL: -${stopLossPct}%`);
 
   return new Promise((resolve) => {
     const interval = setInterval(async () => {
@@ -22,20 +24,28 @@ export const monitorPosition = async (
 
         const currentPrice = parseFloat(response.data[tokenMint].price);
 
-        const priceChange = ((currentPrice - entryPrice) / entryPrice) * 100;
-        console.log(`💰 ${tokenMint.substring(0, 4)}... Current: $${currentPrice.toFixed(6)} (${priceChange > 0 ? '+' : ''}${priceChange.toFixed(2)}%)`);
+        // Update trailing ATH
+        if (currentPrice > highestPrice) {
+          highestPrice = currentPrice;
+          console.log(`🚀 New Local ATH for ${tokenMint.substring(0, 4)}... : $${highestPrice.toFixed(6)}! Trailing SL moved up.`);
+        }
+
+        const priceChangeFromEntry = ((currentPrice - entryPrice) / entryPrice) * 100;
+        const priceChangeFromATH = ((currentPrice - highestPrice) / highestPrice) * 100;
+
+        console.log(`💰 ${tokenMint.substring(0, 4)}... Current: $${currentPrice.toFixed(6)} | PnL: ${priceChangeFromEntry > 0 ? '+' : ''}${priceChangeFromEntry.toFixed(2)}% | Drawdown from ATH: ${priceChangeFromATH.toFixed(2)}%`);
 
         // 2. Check Take Profit
-        if (priceChange >= takeProfitPct) {
+        if (priceChangeFromEntry >= takeProfitPct) {
           console.log("🎯 TARGET REACHED! Preparing to sell for profit...");
           clearInterval(interval);
           resolve("SELL");
           return;
         }
 
-        // 3. Check Stop Loss
-        if (priceChange <= -stopLossPct) {
-          console.log("🚨 STOP LOSS TRIGGERED! Preparing to sell to save capital...");
+        // 3. Check Trailing Stop Loss
+        if (priceChangeFromATH <= -stopLossPct) {
+          console.log(`🚨 TRAILING STOP LOSS TRIGGERED at -${stopLossPct}% from ATH! Preparing to sell to lock in/save capital...`);
           clearInterval(interval);
           resolve("SELL");
           return;

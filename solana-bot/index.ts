@@ -63,9 +63,24 @@ export const signAndSend = async (connection: Connection, wallet: Keypair, swapT
   var transaction = VersionedTransaction.deserialize(swapTransactionBuf);
   transaction.sign([wallet]);
 
-  // 4. Execute
+  // 4. Execute and Await Confirmation
+  const latestBlockhash = await connection.getLatestBlockhash();
+
+  console.log(`🚀 Sending Trade...`);
   const txid = await connection.sendTransaction(transaction);
-  console.log(`🚀 Trade Sent! View on Solscan: https://solscan.io/tx/${txid}`);
+  console.log(`⏳ Awaiting Confirmation...`);
+
+  const confirmation = await connection.confirmTransaction({
+    signature: txid,
+    blockhash: latestBlockhash.blockhash,
+    lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
+  });
+
+  if (confirmation.value.err) {
+     throw new Error(`Transaction Failed: ${confirmation.value.err}`);
+  }
+
+  console.log(`✅ Trade Confirmed! View on Solscan: https://solscan.io/tx/${txid}`);
 
   // Update Trade count
   totalTrades++;
