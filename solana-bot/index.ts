@@ -39,109 +39,122 @@ export const getDynamicPriorityFee = async (connection: Connection) => {
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-export const getSwapTransaction = async (
+
+export const executeUltraSwap = async (
+  connection: Connection,
   wallet: Keypair,
   inputMint: string,
   outputMint: string,
   amountInLamports: number,
   priorityFee: number
 ) => {
-  let quoteResponse: any = null;
-  let attempts = 0;
-  const maxAttempts = 15; // 15 attempts * 2 seconds = 30 seconds wait time
+  let orderResponse: any = null;
   const isSnipe = inputMint === TOKENS.SOL; // Assume it's a snipe if buying with SOL
 
+  const retryDelays = [5000, 10000, 20000]; // 5s, 10s, 20s
+  let attempts = 0;
+
   try {
-    // 1. Get the best price (Quote) with a Retry Loop for brand new tokens
-    while (attempts < maxAttempts) {
-      // Note: Snipe trades need high slippage (1000 = 10%) due to massive volatility on launch.
-      const quoteRequest = await fetch(
-        `${JUPITER_API}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountInLamports}&slippageBps=1000`
-      );
+    // 1. Get the unsigned transaction (Order) with a Retry Loop for brand new tokens
+    while (attempts <= retryDelays.length) {
+      console.log(`[DEBUG] Fetching Jupiter Ultra Order for ${outputMint}...`);
+      const orderRequest = await fetch(`https://api.jup.ag/ultra/v1/order`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${BIRDEYE_API_KEY}`
+        },
+        body: JSON.stringify({
+          inputMint: inputMint,
+          outputMint: outputMint,
+          amount: amountInLamports,
+          slippageBps: isSnipe ? 1000 : 50, // 10% for snipes, 0.5% for regular
+          dynamicSlippage: true, // Requested by user
+          userPublicKey: wallet.publicKey.toString(),
+          wrapAndUnwrapSol: true,
+          computeUnitPriceMicroLamports: priorityFee
+        })
+      });
 
-      quoteResponse = await quoteRequest.json();
+      orderResponse = await orderRequest.json();
 
-      if (quoteRequest.ok && !quoteResponse.error) {
-         // Success! We found a route.
+      if (orderRequest.ok && !orderResponse.error && !orderResponse.message) {
+         // Success! We found a route and got the order.
+         console.log(`[DEBUG] Jupiter Ultra Order retrieved successfully. Request ID: ${orderResponse.requestId}`);
          break;
       }
 
-      // Check if the error is due to missing liquidity/routing
-      if (quoteResponse?.error?.includes('COULD_NOT_FIND_ANY_ROUTE') && isSnipe) {
+      const errorMessage = orderResponse?.error || orderResponse?.message || 'Unknown error';
+
+      // Check if the error is due to missing liquidity/routing ('No route found')
+      if (errorMessage.toLowerCase().includes('route') && isSnipe && attempts < retryDelays.length) {
+         const waitTime = retryDelays[attempts] || 5000;
+         console.log(`[WARNING] Jupiter could not find a route. Retrying in ${waitTime / 1000}s... (Attempt ${attempts + 1}/3)`);
+         await delay(waitTime);
          attempts++;
-         console.log(`⏳ Waiting for liquidity... Jupiter could not find a route. (Attempt ${attempts}/${maxAttempts}). Retrying in 2s...`);
-         await delay(2000);
       } else {
-         console.error(`❌ Jupiter Quote Failed: ${quoteResponse?.error || 'Unknown error.'}`);
-         return null; // A fatal error occurred that wasn't a routing delay
+         console.error(`❌ Jupiter Ultra Order Failed: [HTTP ${orderRequest.status}] ${errorMessage}`);
+         return false; // Fatal error or max retries reached
       }
     }
 
-    if (!quoteResponse || quoteResponse.error) {
-       console.error(`❌ Jupiter Quote Failed: Token lacked liquidity after ${maxAttempts} attempts. Skipping trade.`);
-       return null;
+    if (!orderResponse || orderResponse.error || orderResponse.message) {
+       console.error(`❌ Jupiter Ultra Order Failed: Token lacked liquidity after max attempts. Skipping trade.`);
+       return false;
     }
 
-    // 2. Get the serialized transaction
-    const response = await fetch(`${JUPITER_API}/swap`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        quoteResponse,
-        userPublicKey: wallet.publicKey.toString(),
-        wrapAndUnwrapSol: true,
-        // 2026 Pro Tip: Set high priority to beat other bots
-        computeUnitPriceMicroLamports: priorityFee
-      })
+    const { swapTransaction, requestId } = orderResponse;
+    if (!swapTransaction || !requestId) {
+       console.error("Jupiter Ultra Swap API Error: Missing swapTransaction or requestId in response:", orderResponse);
+       return false;
+    }
+
+    // 2. Deserialize, Sign, and Execute
+    console.log(`[DEBUG] Signing transaction...`);
+    const swapTransactionBuf = Buffer.from(swapTransaction, 'base64');
+    let transaction = VersionedTransaction.deserialize(swapTransactionBuf);
+
+    // Sign the transaction
+    transaction.sign([wallet]);
+
+    // Serialize the signed transaction
+    const signedTxBase64 = Buffer.from(transaction.serialize()).toString('base64');
+
+    console.log(`[DEBUG] Executing Jupiter Ultra Order (RequestId: ${requestId})...`);
+    const executeResponse = await fetch(`https://api.jup.ag/ultra/v1/execute`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${BIRDEYE_API_KEY}`
+        },
+        body: JSON.stringify({
+            requestId: requestId,
+            tx: signedTxBase64
+        })
     });
 
-    const { swapTransaction, error } = await response.json();
-    if (error) {
-       console.error("Jupiter Swap API Error:", error);
-       return null;
+    const executeResult = await executeResponse.json();
+
+    if (!executeResponse.ok || executeResult.error || executeResult.message) {
+         const errMessage = executeResult.error || executeResult.message || JSON.stringify(executeResult);
+         console.error(`❌ Jupiter Ultra Execute Failed: [HTTP ${executeResponse.status}] ${errMessage}`);
+         return false;
     }
 
-    return swapTransaction;
+    console.log(`✅ Jupiter Ultra Swap Executed! TxHash: ${executeResult.txid || 'Unknown'}`);
+    return true; // Successfully executed swap
   } catch (networkError: any) {
     // Specifically catch ENOTFOUND or IP blocks common on Render
     if (networkError?.message?.includes('ENOTFOUND') || networkError?.code === 'ENOTFOUND') {
        console.error(`🚨 FATAL NETWORK ERROR: Your server (Render) cannot connect to Jupiter (${networkError.message}).`);
        console.error(`   👉 Jupiter actively blocks Render IP addresses to prevent bot spam. You must run this bot locally, or use a Proxy/Custom Jupiter API node.`);
     } else {
-       console.error(`Network Error in getSwapTransaction:`, networkError?.message || networkError);
+       console.error(`Network Error in executeUltraSwap:`, networkError?.message || networkError);
     }
-    return null;
+    return false;
   }
 };
 
-export const signAndSend = async (connection: Connection, wallet: Keypair, swapTransaction: string) => {
-  // 3. Deserialize and Sign
-  const swapTransactionBuf = Buffer.from(swapTransaction, 'base64');
-  var transaction = VersionedTransaction.deserialize(swapTransactionBuf);
-  transaction.sign([wallet]);
-
-  // 4. Execute and Await Confirmation
-  const latestBlockhash = await connection.getLatestBlockhash();
-
-  console.log(`🚀 Sending Trade...`);
-  const txid = await connection.sendTransaction(transaction);
-  console.log(`⏳ Awaiting Confirmation...`);
-
-  const confirmation = await connection.confirmTransaction({
-    signature: txid,
-    blockhash: latestBlockhash.blockhash,
-    lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
-  });
-
-  if (confirmation.value.err) {
-     throw new Error(`Transaction Failed: ${confirmation.value.err}`);
-  }
-
-  console.log(`✅ Trade Confirmed! View on Solscan: https://solscan.io/tx/${txid}`);
-
-  // Update Trade count
-  totalTrades++;
-};
 
 if (!PRIVATE_KEY) {
   console.warn("WARNING: PHANTOM_PRIVATE_KEY is not set in the environment variables. The bot will not be able to execute trades.");
@@ -577,14 +590,8 @@ async function executeSwap(jupiterQuoteApi: any, connection: Connection, wallet:
 
   try {
     const priorityFee = await getDynamicPriorityFee(connection);
-    const swapTransaction = await getSwapTransaction(wallet, decision.inputMint, decision.outputMint, finalAmount, priorityFee);
-    if (!swapTransaction) {
-       console.error("Failed to obtain swap transaction from Jupiter.");
-       return false;
-    }
-
-    await signAndSend(connection, wallet, swapTransaction);
-    return true; // Successfully executed swap
+    const success = await executeUltraSwap(connection, wallet, decision.inputMint, decision.outputMint, finalAmount, priorityFee);
+    return success; // Successfully executed swap
   } catch (error) {
     console.error("Error executing swap:", error);
     return false;
