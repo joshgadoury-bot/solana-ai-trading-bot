@@ -24,6 +24,7 @@
     "bs58": "^5.0.0",
     "cross-fetch": "^4.1.0",
     "dotenv": "^16.4.5",
+    "helius-laserstream": "^0.3.0",
     "openai": "^4.0.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"

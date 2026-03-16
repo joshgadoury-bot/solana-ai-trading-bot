@@ -12,6 +12,7 @@ import { monitorPosition } from './monitor';
 
 // Configuration
 const RPC_URL = process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
+const WSS_URL = process.env.SOLANA_WSS_URL;
 const PRIVATE_KEY = process.env.PHANTOM_PRIVATE_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY;
@@ -200,6 +201,25 @@ let initialBalanceSol = 0;
 let currentBalanceSol = 0;
 export let totalTrades = 0;
 
+export const listenToAccount = (connection: Connection, publicKey: PublicKey) => {
+  console.log(`📡 WebSocket Monitoring Active for Wallet: ${publicKey.toBase58()}`);
+
+  // onAccountChange uses the provided WebSocket subscription (WSS_URL)
+  connection.onAccountChange(
+      publicKey,
+      (accountInfo, context) => {
+          const newBalanceSol = accountInfo.lamports / LAMPORTS_PER_SOL;
+          // Only log and update if there's an actual change in the SOL balance
+          if (newBalanceSol !== currentBalanceSol) {
+            console.log(`\n🔔 Wallet Balance Changed! New Balance: ${newBalanceSol.toFixed(4)} SOL`);
+            currentBalanceSol = newBalanceSol;
+            renderDashboard(); // Refresh dashboard on change
+          }
+      },
+      'confirmed'
+  );
+};
+
 export const checkBalance = async (connection: Connection, publicKey: PublicKey) => {
   const balance = await connection.getBalance(publicKey);
   const balanceSol = balance / LAMPORTS_PER_SOL;
@@ -308,7 +328,12 @@ export const run = async () => {
 
   // 1. Setup Connection to Solana
   console.log(`Connecting to Solana via RPC: ${RPC_URL}`);
-  const connection = new Connection(RPC_URL, 'confirmed');
+  const connectionConfig: any = { commitment: 'confirmed' };
+  if (WSS_URL) {
+     console.log(`Using WebSocket Endpoint: ${WSS_URL}`);
+     connectionConfig.wsEndpoint = WSS_URL;
+  }
+  const connection = new Connection(RPC_URL, connectionConfig);
 
   try {
     const version = await connection.getVersion();
@@ -323,6 +348,7 @@ export const run = async () => {
   try {
     wallet = getPhantomWallet();
     await checkBalance(connection, wallet.publicKey);
+    listenToAccount(connection, wallet.publicKey); // Start WebSocket listener
   } catch (error: any) {
      console.error("Wallet setup failed:", error?.message || error);
      console.log("Running in watch-only mode (No wallet configured).");
