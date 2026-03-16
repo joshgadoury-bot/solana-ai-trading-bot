@@ -419,9 +419,10 @@ export const run = async () => {
   }
 };
 
+let isAiDisabled = false;
+
 async function analyzeMarketAndDecide(jupiterQuoteApi: any) {
-  if (!OPENAI_API_KEY) {
-     console.error("No OPENAI_API_KEY configured. Skipping AI analysis.");
+  if (!OPENAI_API_KEY || isAiDisabled) {
      return null;
   }
 
@@ -481,7 +482,13 @@ async function analyzeMarketAndDecide(jupiterQuoteApi: any) {
        return null;
     }
   } catch (error: any) {
-     console.error("AI Analysis failed:", error?.message || error);
+     const errorMsg = error?.message || String(error);
+     if (errorMsg.includes("429") || errorMsg.includes("quota")) {
+        console.error("🤖 AI Analysis Disabled: OpenAI quota exceeded. Please check your billing at https://platform.openai.com/account/billing.");
+        isAiDisabled = true; // Stop polling to keep the console clean for the sniper
+     } else {
+        console.error("AI Analysis failed:", errorMsg);
+     }
      return null;
   }
 }
