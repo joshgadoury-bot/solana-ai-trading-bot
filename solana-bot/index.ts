@@ -37,6 +37,8 @@ export const getDynamicPriorityFee = async (connection: Connection) => {
   return Math.max(medianFee, 5000);
 };
 
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 export const getSwapTransaction = async (
   wallet: Keypair,
   inputMint: string,
@@ -44,17 +46,38 @@ export const getSwapTransaction = async (
   amountInLamports: number,
   priorityFee: number
 ) => {
-  // 1. Get the best price (Quote)
-  // Note: Snipe trades need high slippage (e.g., 500 = 5%, 1000 = 10%) due to massive volatility on launch.
-  // Tokens without active pools yet will return "COULD_NOT_FIND_ANY_ROUTE".
-  const quoteRequest = await fetch(
-    `${JUPITER_API}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountInLamports}&slippageBps=1000`
-  );
+  let quoteResponse: any = null;
+  let attempts = 0;
+  const maxAttempts = 15; // 15 attempts * 2 seconds = 30 seconds wait time
+  const isSnipe = inputMint === TOKENS.SOL; // Assume it's a snipe if buying with SOL
 
-  const quoteResponse = await quoteRequest.json();
+  // 1. Get the best price (Quote) with a Retry Loop for brand new tokens
+  while (attempts < maxAttempts) {
+    // Note: Snipe trades need high slippage (1000 = 10%) due to massive volatility on launch.
+    const quoteRequest = await fetch(
+      `${JUPITER_API}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountInLamports}&slippageBps=1000`
+    );
 
-  if (!quoteRequest.ok || quoteResponse.error) {
-     console.error(`❌ Jupiter Quote Failed: ${quoteResponse.error || 'Unknown error. Token may lack liquidity or pools.'}`);
+    quoteResponse = await quoteRequest.json();
+
+    if (quoteRequest.ok && !quoteResponse.error) {
+       // Success! We found a route.
+       break;
+    }
+
+    // Check if the error is due to missing liquidity/routing
+    if (quoteResponse?.error?.includes('COULD_NOT_FIND_ANY_ROUTE') && isSnipe) {
+       attempts++;
+       console.log(`⏳ Waiting for liquidity... Jupiter could not find a route. (Attempt ${attempts}/${maxAttempts}). Retrying in 2s...`);
+       await delay(2000);
+    } else {
+       console.error(`❌ Jupiter Quote Failed: ${quoteResponse?.error || 'Unknown error.'}`);
+       return null; // A fatal error occurred that wasn't a routing delay
+    }
+  }
+
+  if (!quoteResponse || quoteResponse.error) {
+     console.error(`❌ Jupiter Quote Failed: Token lacked liquidity after ${maxAttempts} attempts. Skipping trade.`);
      return null;
   }
 
@@ -369,37 +392,46 @@ export const run = async () => {
          if (rugCheckReport.isSafe) {
            console.log(`Fetching 1-minute Birdeye trend for ${mintAddress}...`);
            const trendData = await fetchBirdeyeTrend(mintAddress);
-           if (trendData) {
-             const isSpiking = checkPriceSpike(trendData);
-             if (isSpiking) {
-               console.log(`🎯 Triggering snipe trade for ${mintAddress}!`);
-               const buySuccess = await executeSwap(jupiterQuoteApi, connection, wallet!, {
-                 inputMint: TOKENS.SOL,
-                 outputMint: mintAddress,
-                 amount: 0.1 * LAMPORTS_PER_SOL // Sniper buys max 0.1 SOL immediately
-               });
 
-               if (buySuccess) {
-                 // Fetch the current entry price to begin monitoring
-                 // Note: We use Jupiter here for immediate, free lookup on single tokens right after buy,
-                 // but monitor.ts handles ongoing multi-price batching for open positions if adapted.
-                 const entryData = await fetch(`https://api.jup.ag/price/v2?ids=${mintAddress}`).then(res => res.json());
-                 if (entryData.data && entryData.data[mintAddress]) {
-                    const entryPrice = entryData.data[mintAddress].price;
-                    const action = await monitorPosition(mintAddress, entryPrice, 20, 10);
+           let isSpiking = false;
+           if (trendData === "SKIP_TREND") {
+             console.log(`⚠️ Birdeye key missing. Skipping 5% spike check. Sniping safe token immediately!`);
+             isSpiking = true;
+           } else if (!trendData || (Array.isArray(trendData) && trendData.length === 0)) {
+             console.log(`🚀 Token ${mintAddress} is completely fresh (no Birdeye history yet). Sniping immediately!`);
+             isSpiking = true;
+           } else {
+             isSpiking = checkPriceSpike(trendData as any[]);
+           }
 
-                    if (action === "SELL") {
-                        const tokenBalance = await getTokenBalance(connection, wallet.publicKey, new PublicKey(mintAddress));
-                        if (tokenBalance > 0) {
-                           console.log(`Selling full balance of ${mintAddress}`);
-                           await executeSwap(jupiterQuoteApi, connection, wallet!, {
-                             inputMint: mintAddress,
-                             outputMint: TOKENS.SOL,
-                             amount: tokenBalance // Sell entire bag back to SOL
-                           });
-                        }
-                    }
-                 }
+           if (isSpiking) {
+             console.log(`🎯 Triggering snipe trade for ${mintAddress}!`);
+             const buySuccess = await executeSwap(jupiterQuoteApi, connection, wallet!, {
+               inputMint: TOKENS.SOL,
+               outputMint: mintAddress,
+               amount: 0.1 * LAMPORTS_PER_SOL // Sniper buys max 0.1 SOL immediately
+             });
+
+             if (buySuccess) {
+               // Fetch the current entry price to begin monitoring
+               // Note: We use Jupiter here for immediate, free lookup on single tokens right after buy,
+               // but monitor.ts handles ongoing multi-price batching for open positions if adapted.
+               const entryData = await fetch(`https://api.jup.ag/price/v2?ids=${mintAddress}`).then(res => res.json());
+               if (entryData.data && entryData.data[mintAddress]) {
+                  const entryPrice = entryData.data[mintAddress].price;
+                  const action = await monitorPosition(mintAddress, entryPrice, 20, 10);
+
+                  if (action === "SELL") {
+                      const tokenBalance = await getTokenBalance(connection, wallet.publicKey, new PublicKey(mintAddress));
+                      if (tokenBalance > 0) {
+                         console.log(`Selling full balance of ${mintAddress}`);
+                         await executeSwap(jupiterQuoteApi, connection, wallet!, {
+                           inputMint: mintAddress,
+                           outputMint: TOKENS.SOL,
+                           amount: tokenBalance // Sell entire bag back to SOL
+                         });
+                      }
+                  }
                }
              }
            }
