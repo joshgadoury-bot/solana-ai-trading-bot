@@ -51,56 +51,67 @@ export const getSwapTransaction = async (
   const maxAttempts = 15; // 15 attempts * 2 seconds = 30 seconds wait time
   const isSnipe = inputMint === TOKENS.SOL; // Assume it's a snipe if buying with SOL
 
-  // 1. Get the best price (Quote) with a Retry Loop for brand new tokens
-  while (attempts < maxAttempts) {
-    // Note: Snipe trades need high slippage (1000 = 10%) due to massive volatility on launch.
-    const quoteRequest = await fetch(
-      `${JUPITER_API}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountInLamports}&slippageBps=1000`
-    );
+  try {
+    // 1. Get the best price (Quote) with a Retry Loop for brand new tokens
+    while (attempts < maxAttempts) {
+      // Note: Snipe trades need high slippage (1000 = 10%) due to massive volatility on launch.
+      const quoteRequest = await fetch(
+        `${JUPITER_API}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountInLamports}&slippageBps=1000`
+      );
 
-    quoteResponse = await quoteRequest.json();
+      quoteResponse = await quoteRequest.json();
 
-    if (quoteRequest.ok && !quoteResponse.error) {
-       // Success! We found a route.
-       break;
+      if (quoteRequest.ok && !quoteResponse.error) {
+         // Success! We found a route.
+         break;
+      }
+
+      // Check if the error is due to missing liquidity/routing
+      if (quoteResponse?.error?.includes('COULD_NOT_FIND_ANY_ROUTE') && isSnipe) {
+         attempts++;
+         console.log(`⏳ Waiting for liquidity... Jupiter could not find a route. (Attempt ${attempts}/${maxAttempts}). Retrying in 2s...`);
+         await delay(2000);
+      } else {
+         console.error(`❌ Jupiter Quote Failed: ${quoteResponse?.error || 'Unknown error.'}`);
+         return null; // A fatal error occurred that wasn't a routing delay
+      }
     }
 
-    // Check if the error is due to missing liquidity/routing
-    if (quoteResponse?.error?.includes('COULD_NOT_FIND_ANY_ROUTE') && isSnipe) {
-       attempts++;
-       console.log(`⏳ Waiting for liquidity... Jupiter could not find a route. (Attempt ${attempts}/${maxAttempts}). Retrying in 2s...`);
-       await delay(2000);
+    if (!quoteResponse || quoteResponse.error) {
+       console.error(`❌ Jupiter Quote Failed: Token lacked liquidity after ${maxAttempts} attempts. Skipping trade.`);
+       return null;
+    }
+
+    // 2. Get the serialized transaction
+    const response = await fetch(`${JUPITER_API}/swap`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        quoteResponse,
+        userPublicKey: wallet.publicKey.toString(),
+        wrapAndUnwrapSol: true,
+        // 2026 Pro Tip: Set high priority to beat other bots
+        computeUnitPriceMicroLamports: priorityFee
+      })
+    });
+
+    const { swapTransaction, error } = await response.json();
+    if (error) {
+       console.error("Jupiter Swap API Error:", error);
+       return null;
+    }
+
+    return swapTransaction;
+  } catch (networkError: any) {
+    // Specifically catch ENOTFOUND or IP blocks common on Render
+    if (networkError?.message?.includes('ENOTFOUND') || networkError?.code === 'ENOTFOUND') {
+       console.error(`🚨 FATAL NETWORK ERROR: Your server (Render) cannot connect to Jupiter (${networkError.message}).`);
+       console.error(`   👉 Jupiter actively blocks Render IP addresses to prevent bot spam. You must run this bot locally, or use a Proxy/Custom Jupiter API node.`);
     } else {
-       console.error(`❌ Jupiter Quote Failed: ${quoteResponse?.error || 'Unknown error.'}`);
-       return null; // A fatal error occurred that wasn't a routing delay
+       console.error(`Network Error in getSwapTransaction:`, networkError?.message || networkError);
     }
+    return null;
   }
-
-  if (!quoteResponse || quoteResponse.error) {
-     console.error(`❌ Jupiter Quote Failed: Token lacked liquidity after ${maxAttempts} attempts. Skipping trade.`);
-     return null;
-  }
-
-  // 2. Get the serialized transaction
-  const response = await fetch(`${JUPITER_API}/swap`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      quoteResponse,
-      userPublicKey: wallet.publicKey.toString(),
-      wrapAndUnwrapSol: true,
-      // 2026 Pro Tip: Set high priority to beat other bots
-      computeUnitPriceMicroLamports: priorityFee
-    })
-  });
-
-  const { swapTransaction, error } = await response.json();
-  if (error) {
-     console.error("Jupiter Swap API Error:", error);
-     return null;
-  }
-
-  return swapTransaction;
 };
 
 export const signAndSend = async (connection: Connection, wallet: Keypair, swapTransaction: string) => {
@@ -385,10 +396,13 @@ export const run = async () => {
 
        const securityReport = await checkTokenSafety(connection, mintAddress);
 
+       console.debug(`[DEBUG] Token Safety Check: isSafe=${securityReport.isSafe}`);
        if (securityReport.isSafe) {
          console.log(`✅ BOTTING: ${mintAddress}`);
 
          const rugCheckReport = await getRugCheckScore(mintAddress);
+         console.debug(`[DEBUG] RugCheck Check: score=${rugCheckReport.score}, isSafe=${rugCheckReport.isSafe}`);
+
          if (rugCheckReport.isSafe) {
            console.log(`Fetching 1-minute Birdeye trend for ${mintAddress}...`);
            const trendData = await fetchBirdeyeTrend(mintAddress);
@@ -404,12 +418,17 @@ export const run = async () => {
              isSpiking = checkPriceSpike(trendData as any[]);
            }
 
+           console.debug(`[DEBUG] Price Spike Check: isSpiking=${isSpiking}`);
            if (isSpiking) {
              console.log(`🎯 Triggering snipe trade for ${mintAddress}!`);
+
+             const tradeAmount = 0.1 * LAMPORTS_PER_SOL;
+             console.debug(`[DEBUG] Triggering executeSwap with Input: SOL, Output: ${mintAddress}, Amount: ${tradeAmount / LAMPORTS_PER_SOL} SOL`);
+
              const buySuccess = await executeSwap(jupiterQuoteApi, connection, wallet!, {
                inputMint: TOKENS.SOL,
                outputMint: mintAddress,
-               amount: 0.1 * LAMPORTS_PER_SOL // Sniper buys max 0.1 SOL immediately
+               amount: tradeAmount // Sniper buys max 0.1 SOL immediately
              });
 
              if (buySuccess) {
