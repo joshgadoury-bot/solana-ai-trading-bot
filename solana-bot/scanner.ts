@@ -5,9 +5,9 @@ import Client from '@triton-one/yellowstone-grpc';
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const GRPC_ENDPOINT = process.env.GRPC_ENDPOINT;
 
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+export const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function fetchWithBackoff<T>(
+export async function fetchWithBackoff<T>(
   action: () => Promise<T>,
   maxRetries = 3,
   initialDelayMs = 1000
@@ -40,16 +40,25 @@ async function processQueue(connection: Connection, callback: (mint: string) => 
   isFetching = true;
 
   while (queue.length > 0) {
+    // Prevent massive backlogs and memory leaks by keeping queue small
+    // Drops older transactions to prioritize fresh snipes and save RPC credits
+    if (queue.length > 10) {
+       console.log(`⚠️ Queue overloaded (${queue.length} items). Dropping older transactions to catch up...`);
+       queue.splice(0, queue.length - 10);
+    }
+
     const signature = queue.shift();
     if (!signature) continue;
 
     try {
-      // Small 500ms baseline delay to respect standard RPC limits
-      await delay(500);
+      // 1000ms baseline delay to respect standard Free Tier RPC limits
+      await delay(1000);
 
-      const tx = await fetchWithBackoff(async () => {
-        return await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0 });
-      });
+      const tx = await fetchWithBackoff(
+        async () => connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0 }),
+        5, // Up to 5 retries
+        2000 // 2s initial delay
+      );
 
       if (!tx || !tx.transaction || !tx.transaction.message || !tx.transaction.message.accountKeys) {
         console.log(`⚠️ Could not parse base mint from transaction ${signature}`);

@@ -232,8 +232,25 @@ export const checkBalance = async (connection: Connection, publicKey: PublicKey)
   return balance;
 };
 
+import { fetchBirdeyeWalletBalances } from './birdeye';
+
 export const getTokenBalance = async (connection: Connection, walletAddress: PublicKey, mintAddress: PublicKey) => {
   try {
+    // Use Birdeye API if key is present to respect 60s cache requirement
+    if (BIRDEYE_API_KEY) {
+       const balances = await fetchBirdeyeWalletBalances(walletAddress.toBase58());
+       const targetBalanceUI = balances[mintAddress.toBase58()] || 0;
+
+       // Note: Birdeye returns UI amount. To sell via Jupiter we need raw amount (lamports)
+       // So we fetch the mint decimals to convert it back to raw amount.
+       // For speed in a snipe bot, you might still want standard RPC.
+       // Assuming we fetch decimals:
+       const mintInfo = await connection.getParsedAccountInfo(mintAddress);
+       const decimals = (mintInfo?.value?.data as ParsedAccountData)?.parsed?.info?.decimals || 0;
+       return targetBalanceUI * Math.pow(10, decimals);
+    }
+
+    // Fallback to standard RPC
     const ata = await getAssociatedTokenAddress(mintAddress, walletAddress);
     const accountInfo = await getAccount(connection, ata);
     return Number(accountInfo.amount); // amount is in raw smallest units
@@ -268,37 +285,7 @@ export const getPhantomWallet = () => {
   return Keypair.fromSecretKey(secretKey);
 };
 
-export const fetchBirdeyeTrend = async (mintAddress: string) => {
-  if (!BIRDEYE_API_KEY) {
-    console.warn("Skipping Birdeye trend analysis because BIRDEYE_API_KEY is not set.");
-    return null;
-  }
-
-  // Get UNIX timestamp in seconds for the last 5 minutes
-  const now = Math.floor(Date.now() / 1000);
-  const fiveMinsAgo = now - (5 * 60);
-
-  try {
-    const response = await fetch(`https://public-api.birdeye.so/defi/history_price?address=${mintAddress}&address_type=token&type=1m&time_from=${fiveMinsAgo}&time_to=${now}`, {
-      headers: {
-        'X-API-KEY': BIRDEYE_API_KEY,
-        'Accept': 'application/json'
-      }
-    });
-
-    const data = await response.json();
-    if (data.success && data.data && data.data.items.length > 0) {
-      console.log(`📊 5-Minute Trend for ${mintAddress}: Fetched ${data.data.items.length} price points.`);
-      return data.data.items;
-    } else {
-      console.log(`📉 No recent trend data found for ${mintAddress} on Birdeye.`);
-      return null;
-    }
-  } catch (error: any) {
-    console.error(`Failed to fetch Birdeye trend for ${mintAddress}:`, error?.message || error);
-    return null;
-  }
-};
+import { fetchBirdeyeTrend } from './birdeye';
 
 export const checkPriceSpike = (trendData: any[]) => {
   if (!trendData || trendData.length < 2) return false;
@@ -385,7 +372,9 @@ export const run = async () => {
 
                if (buySuccess) {
                  // Fetch the current entry price to begin monitoring
-                 const entryData = await fetch(`https://price.jup.ag/v4/price?ids=${mintAddress}`).then(res => res.json());
+                 // Note: We use Jupiter here for immediate, free lookup on single tokens right after buy,
+                 // but monitor.ts handles ongoing multi-price batching for open positions if adapted.
+                 const entryData = await fetch(`https://api.jup.ag/price/v2?ids=${mintAddress}`).then(res => res.json());
                  if (entryData.data && entryData.data[mintAddress]) {
                     const entryPrice = entryData.data[mintAddress].price;
                     const action = await monitorPosition(mintAddress, entryPrice, 20, 10);
@@ -430,7 +419,7 @@ async function analyzeMarketAndDecide(jupiterQuoteApi: any) {
   // 1. Fetch Real Market Data (SOL/USDC Price)
   let solPriceData = "Unknown";
   try {
-      const priceResponse = await fetch(`https://price.jup.ag/v4/price?ids=SOL`);
+      const priceResponse = await fetch(`https://api.jup.ag/price/v2?ids=SOL`);
       const priceJson = await priceResponse.json();
       if (priceJson.data && priceJson.data.SOL) {
           solPriceData = priceJson.data.SOL.price;
@@ -445,7 +434,7 @@ async function analyzeMarketAndDecide(jupiterQuoteApi: any) {
 
   try {
     const response = await openai.chat.completions.create({
-      model: "gpt-4-turbo",
+      model: "gpt-4o",
       messages: [
         {
           role: "system",
@@ -550,7 +539,7 @@ async function startTradingLoop(connection: Connection, wallet: Keypair, jupiter
 
         // If we bought a token with SOL, monitor it
         if (buySuccess && decision.inputMint === TOKENS.SOL && decision.outputMint !== TOKENS.USDC) {
-             const entryData = await fetch(`https://price.jup.ag/v4/price?ids=${decision.outputMint}`).then(res => res.json());
+             const entryData = await fetch(`https://api.jup.ag/price/v2?ids=${decision.outputMint}`).then(res => res.json());
              if (entryData.data && entryData.data[decision.outputMint]) {
                 const entryPrice = entryData.data[decision.outputMint].price;
                 const action = await monitorPosition(decision.outputMint, entryPrice, 20, 10);
