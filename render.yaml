@@ -2,8 +2,9 @@ services:
   - type: worker
     name: solana-ai-trading-bot
     env: node
-    buildCommand: "cd solana-bot && npm install"
-    startCommand: "cd solana-bot && npm start"
+    rootDir: solana-bot
+    buildCommand: "npm run build"
+    startCommand: "npm start"
     envVars:
       - key: NODE_VERSION
         value: 22.16.0
