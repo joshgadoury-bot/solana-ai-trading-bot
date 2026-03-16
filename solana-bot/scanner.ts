@@ -5,22 +5,71 @@ import Client from '@triton-one/yellowstone-grpc';
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const GRPC_ENDPOINT = process.env.GRPC_ENDPOINT;
 
-async function fetchMintFromTx(connection: Connection, signature: string): Promise<string | null> {
-  try {
-    const tx: ParsedTransactionWithMeta | null = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0 });
-    if (!tx || !tx.transaction || !tx.transaction.message || !tx.transaction.message.accountKeys) return null;
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-    // The first account created in an InitializeMint tx is usually the Mint address
-    // It's often at index 1 because index 0 is the fee payer
-    const accountKeys = tx.transaction.message.accountKeys;
-    if (accountKeys && accountKeys.length > 1 && accountKeys[1] && accountKeys[1].pubkey) {
-      return accountKeys[1].pubkey.toString();
+async function fetchWithBackoff<T>(
+  action: () => Promise<T>,
+  maxRetries = 3,
+  initialDelayMs = 1000
+): Promise<T | null> {
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    try {
+      return await action();
+    } catch (error: any) {
+      if (error?.message?.includes('429')) {
+        const backoffTime = initialDelayMs * Math.pow(2, attempt);
+        console.warn(`⚠️ Rate limit (429) hit. Retrying in ${backoffTime}ms...`);
+        await delay(backoffTime);
+        attempt++;
+      } else {
+        throw error;
+      }
     }
-    return null;
-  } catch (error: any) {
-    console.error(`Error parsing new token transaction ${signature}:`, error?.message || error);
-    return null;
   }
+  console.error(`❌ Exhausted all ${maxRetries} retries for RPC request.`);
+  return null;
+}
+
+// A simple queue to prevent parallel getParsedTransaction spam
+let isFetching = false;
+const queue: string[] = [];
+
+async function processQueue(connection: Connection, callback: (mint: string) => void) {
+  if (isFetching || queue.length === 0) return;
+  isFetching = true;
+
+  while (queue.length > 0) {
+    const signature = queue.shift();
+    if (!signature) continue;
+
+    try {
+      // Small 500ms baseline delay to respect standard RPC limits
+      await delay(500);
+
+      const tx = await fetchWithBackoff(async () => {
+        return await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0 });
+      });
+
+      if (!tx || !tx.transaction || !tx.transaction.message || !tx.transaction.message.accountKeys) {
+        console.log(`⚠️ Could not parse base mint from transaction ${signature}`);
+        continue;
+      }
+
+      const accountKeys = tx.transaction.message.accountKeys;
+      if (accountKeys && accountKeys.length > 1 && accountKeys[1] && accountKeys[1].pubkey) {
+        const mint = accountKeys[1].pubkey.toString();
+        console.log(`Identified New Token Mint: ${mint}`);
+        callback(mint);
+      } else {
+        console.log(`⚠️ Could not parse base mint from transaction ${signature}`);
+      }
+    } catch (error: any) {
+      console.error(`Error parsing new token transaction ${signature}:`, error?.message || error);
+    }
+  }
+
+  isFetching = false;
 }
 
 export const startGrpcScanner = async (callback: (mint: string) => void) => {
@@ -111,16 +160,11 @@ export const startScanner = async (connection: Connection, callback: (mint: stri
 
       // Check if the log contains the 'InitializeMint' command
       if (logs.some((log: string) => log.includes("InitializeMint"))) {
-        console.log(`✨ New Token Detected! Signature: ${signature}`);
+        console.log(`✨ New Token Detected! Signature: ${signature} (Added to Queue)`);
 
-        fetchMintFromTx(connection, signature).then(mint => {
-          if (mint) {
-             console.log(`Identified New Token Mint: ${mint}`);
-             callback(mint);
-          } else {
-             console.log(`⚠️ Could not parse base mint from transaction ${signature}`);
-          }
-        });
+        // Push to queue to rate limit RPC calls
+        queue.push(signature);
+        processQueue(connection, callback);
       }
     },
     "confirmed"

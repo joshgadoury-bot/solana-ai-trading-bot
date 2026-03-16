@@ -541,7 +541,7 @@ async function startTradingLoop(connection: Connection, wallet: Keypair, jupiter
   // Sequential loop to prevent overlapping API calls
   while (true) {
     try {
-      await checkBalance(connection, wallet.publicKey);
+      // Balance is actively maintained via WebSocket listenToAccount, so we just refresh UI
       renderDashboard();
 
       const decision = await analyzeMarketAndDecide(jupiterQuoteApi);
@@ -572,7 +572,7 @@ async function startTradingLoop(connection: Connection, wallet: Keypair, jupiter
     } catch (error) {
       console.error("Error in trading loop:", error);
     }
-    await loopDelay(10000); // Run every 10 seconds
+    await loopDelay(60000); // Run every 60 seconds
   }
 }
 
