@@ -45,9 +45,18 @@ export const getSwapTransaction = async (
   priorityFee: number
 ) => {
   // 1. Get the best price (Quote)
-  const quoteResponse = await fetch(
-    `${JUPITER_API}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountInLamports}&slippageBps=50`
-  ).then(res => res.json());
+  // Note: Snipe trades need high slippage (e.g., 500 = 5%, 1000 = 10%) due to massive volatility on launch.
+  // Tokens without active pools yet will return "COULD_NOT_FIND_ANY_ROUTE".
+  const quoteRequest = await fetch(
+    `${JUPITER_API}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountInLamports}&slippageBps=1000`
+  );
+
+  const quoteResponse = await quoteRequest.json();
+
+  if (!quoteRequest.ok || quoteResponse.error) {
+     console.error(`❌ Jupiter Quote Failed: ${quoteResponse.error || 'Unknown error. Token may lack liquidity or pools.'}`);
+     return null;
+  }
 
   // 2. Get the serialized transaction
   const response = await fetch(`${JUPITER_API}/swap`, {
