@@ -16,6 +16,7 @@ const WSS_URL = process.env.SOLANA_WSS_URL;
 const PRIVATE_KEY = process.env.PHANTOM_PRIVATE_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY;
+const JUPITER_API_KEY = process.env.JUPITER_API_KEY;
 
 // Constants (Tokens)
 const TOKENS = {
@@ -62,7 +63,7 @@ export const executeUltraSwap = async (
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${BIRDEYE_API_KEY}`
+          'Authorization': `Bearer ${JUPITER_API_KEY}`
         },
         body: JSON.stringify({
           inputMint: inputMint,
@@ -125,7 +126,7 @@ export const executeUltraSwap = async (
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${BIRDEYE_API_KEY}`
+            'Authorization': `Bearer ${JUPITER_API_KEY}`
         },
         body: JSON.stringify({
             requestId: requestId,
